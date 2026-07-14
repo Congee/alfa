@@ -2,6 +2,7 @@ import CoreLocation
 import Foundation
 import Observation
 import SonyBLE
+import os
 
 /// Orchestrates battery-efficient geotagging: owns the CoreLocation source and drives ``CameraCentral`` under the
 /// Balanced policy (decision D4). `@MainActor` and `@Observable` so SwiftUI can bind directly.
@@ -33,11 +34,32 @@ public final class GeotagCoordinator {
     private let location = LocationProvider()
     private let settingsStore: GeotagSettingsStore
     private let defaults: UserDefaults
+    private let log = Logger(subsystem: "me.congee.alfa", category: "coordinator")
     private var minimumDistanceMeters: Double
     private var started = false
     private var tasks: [Task<Void, Never>] = []
+    /// Fires the keep-alive re-push while connected (see ``startHeartbeat()``). Nil when not connected.
+    private var heartbeatTask: Task<Void, Never>?
+
+    #if DEBUG
+    /// Diagnostics (debug builds only): when on, Alfa stops sending **any** location to the camera — real pushes and
+    /// keep-alive heartbeats alike — while still receiving fixes locally. Lets the camera-side location-staleness
+    /// timeout be measured (`docs/08` test T1) and heartbeat recovery verified (T2) without a code change per run.
+    public private(set) var pushesFrozen = false
+    #endif
+    /// Whether geotagging was enabled when the app was last terminated — the signal to resume on relaunch (including
+    /// the background relaunches iOS performs for CoreBluetooth state restoration). Read once at init.
+    private let wasEnabledAtLaunch: Bool
 
     private static let onboardingKey = "me.congee.alfa.hasCompletedOnboarding"
+    private static let enabledKey = "me.congee.alfa.geotagEnabled"
+
+    /// Keep-alive cadence. The camera silently expires a location fix that stops being refreshed, so while connected we
+    /// re-push the last position on this fixed interval — matching Sony's own ~10 s Creators' App cadence (`docs/07`),
+    /// which the user confirmed keeps the fix alive. Deliberately independent of the user's update *interval* (that
+    /// throttles genuine position changes; this only defeats staleness). Must stay well under the camera-side timeout
+    /// (`docs/08` test T1 measures it). Foreground-only by construction — a suspended app can't run this timer.
+    private static let heartbeatInterval: Duration = .seconds(10)
 
     public init(
         settingsStore: GeotagSettingsStore = UserDefaultsGeotagSettingsStore(),
@@ -51,6 +73,7 @@ public final class GeotagCoordinator {
         minimumDistanceMeters = loaded.distanceMeters
         locationAuthorization = location.authorizationStatus.locationAuthorization
         hasCompletedOnboarding = defaults.bool(forKey: Self.onboardingKey)
+        wasEnabledAtLaunch = defaults.bool(forKey: Self.enabledKey)
     }
 
     // The pipeline tasks capture `[weak self]` and iterate streams owned by this coordinator; when it deallocates the
@@ -64,8 +87,28 @@ public final class GeotagCoordinator {
     public func enable() {
         guard !isEnabled else { return }
         isEnabled = true
+        defaults.set(true, forKey: Self.enabledKey) // remembered so a relaunch resumes (state restoration)
         startPipelinesIfNeeded()
         escalateLocationPermission()
+        location.setDistanceFilter(minimumDistanceMeters)
+        location.start()
+        Task {
+            await central.start()
+            await applySettingsToCentral()
+            await central.setEnabled(true)
+        }
+    }
+
+    /// Non-interactively resumes geotagging after an app relaunch — including the *background* relaunches iOS performs
+    /// for CoreBluetooth state restoration — when it was enabled before the app was last terminated. Unlike ``enable()``
+    /// it shows **no** permission prompts: it reuses whatever access is already granted and re-creates the CoreBluetooth
+    /// central (with the same restore identifier) so `willRestoreState` is delivered and the link is re-adopted or, if
+    /// it had dropped, cleanly backed off. Called from the app-launch hook; a no-op unless geotagging was on before.
+    public func resumeIfPreviouslyEnabled() {
+        guard wasEnabledAtLaunch, !isEnabled else { return }
+        log.notice("resuming geotag after relaunch (state restoration)")
+        isEnabled = true
+        startPipelinesIfNeeded()
         location.setDistanceFilter(minimumDistanceMeters)
         location.start()
         Task {
@@ -80,6 +123,7 @@ public final class GeotagCoordinator {
     public func disable() {
         guard isEnabled else { return }
         isEnabled = false
+        defaults.set(false, forKey: Self.enabledKey) // won't resume on the next launch
         cameraName = nil
         location.stop()
         Task { await central.setEnabled(false) }
@@ -88,6 +132,14 @@ public final class GeotagCoordinator {
     /// Explicit low-frequency trigger to re-establish the link and push the current location.
     public func syncNow() {
         Task { await central.requestSync() }
+    }
+
+    /// Reports app foreground/background transitions (wire this to `scenePhase`). In the foreground a dropped link is
+    /// re-established automatically — so the camera geotags again as soon as it powers back on, without a "Sync now"
+    /// tap — and returning to the foreground retries from back-off. Backgrounding cancels any *pending* connect so
+    /// none lingers as a wake-magnet, while keeping a live link for background geotagging.
+    public func setForeground(_ active: Bool) {
+        Task { await central.setForeground(active) }
     }
 
     // MARK: - Permissions (onboarding)
@@ -260,6 +312,11 @@ public final class GeotagCoordinator {
             for await fix in samples {
                 guard let self else { return }
                 self.lastFix = fix
+                #if DEBUG
+                // Diagnostics: keep showing fresh fixes locally but stop sending them, so the camera-side staleness
+                // timeout can be measured (T1) — the phone is proven to still have location; only the writes cease.
+                if self.pushesFrozen { continue }
+                #endif
                 await self.central.submitLocation(fix)
             }
         })
@@ -275,12 +332,60 @@ public final class GeotagCoordinator {
 
     private func handle(_ event: CameraEvent) {
         switch event {
-        case let .stateChanged(state): connection = state
+        case let .stateChanged(state):
+            connection = state
+            // The heartbeat lives no longer than a live link; it is (re)armed by each push below, not here.
+            if state != .connected { stopHeartbeat() }
         case let .bluetoothAvailability(availability): bluetooth = availability
         case .discovered: break
         case let .cameraIdentified(_, name): cameraName = name ?? "Sony camera"
-        case let .locationPushed(count): pushCount = count
+        case let .locationPushed(count):
+            pushCount = count
+            // Every write (real push or keep-alive) pushes the keep-alive deadline back, so the heartbeat only fires
+            // after a full interval of silence — i.e. when stationary.
+            armHeartbeat()
         case let .failure(message): lastError = message
         }
     }
+
+    // MARK: - Keep-alive heartbeat
+    //
+    // The camera silently expires a location fix that stops being refreshed ("Location information cannot be
+    // obtained"), and signals that expiry over no BLE characteristic — so it can only be prevented, not observed. This
+    // is a one-shot timer re-armed after **every** write (via `.locationPushed`): a real position push keeps resetting
+    // it, so it only ever fires after a full ``heartbeatInterval`` of silence — i.e. when the phone is stationary. Its
+    // own re-push emits `.locationPushed`, which re-arms it, so a motionless link self-sustains at the keep-alive
+    // cadence. Foreground-only by construction: a suspended app can't run this timer.
+
+    private func armHeartbeat() {
+        #if DEBUG
+        guard !pushesFrozen else { return }
+        #endif
+        guard isConnected else { return }
+        heartbeatTask?.cancel()
+        heartbeatTask = Task { [weak self] in
+            try? await Task.sleep(for: Self.heartbeatInterval)
+            guard !Task.isCancelled, let self else { return }
+            await self.central.heartbeat()
+        }
+    }
+
+    private func stopHeartbeat() {
+        heartbeatTask?.cancel()
+        heartbeatTask = nil
+    }
+
+    #if DEBUG
+    /// Diagnostics (debug builds only): freeze/unfreeze all outgoing location writes for the `docs/08` IT-11 T1/T2
+    /// tests. Freezing stops the heartbeat and gates the sample pipeline; unfreezing pushes once immediately (whose
+    /// `.locationPushed` re-arms the heartbeat), so recovery without a reconnect can be verified (T2).
+    public func setPushesFrozen(_ frozen: Bool) {
+        pushesFrozen = frozen
+        if frozen {
+            stopHeartbeat()
+        } else if isConnected {
+            Task { await central.heartbeat() }
+        }
+    }
+    #endif
 }

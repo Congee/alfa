@@ -1,6 +1,7 @@
 import CoreBluetooth
 import Foundation
 import SonyProtocol
+import os
 
 /// Low-level events emitted by ``CameraLink`` (all `Sendable`).
 enum LinkEvent: Sendable, Equatable {
@@ -29,6 +30,9 @@ final class CameraLink: NSObject, @unchecked Sendable {
     private let queue = DispatchQueue(label: "me.congee.alfa.ble", qos: .userInitiated)
     private let onEvent: @Sendable (LinkEvent) -> Void
     private let restoreIdentifier: String
+    /// Connection-lifecycle log. Focused on the seams that are otherwise unobservable during a background
+    /// state-restoration relaunch (no debugger attaches). Filter in Console.app: `subsystem:me.congee.alfa`.
+    private let log = Logger(subsystem: "me.congee.alfa", category: "ble")
 
     private var manager: CBCentralManager?
     private var peripheral: CBPeripheral?
@@ -51,9 +55,29 @@ final class CameraLink: NSObject, @unchecked Sendable {
     private var scanTimeout: DispatchWorkItem?
     private var bondRetries = 0
     private var powerNotifyRetries = 0
+    /// Whether the app is in the foreground. A background scan can't surface manufacturer data (so the power gate can't
+    /// run), so the "saw no advertisement → direct connect" fallback is allowed only in the foreground — otherwise a
+    /// background reconnect would blindly re-link to an off-but-connectable camera and drain it.
+    private var isForeground = true
+    /// Set when the current scan has seen the camera advertising *powered-off* (`0x21` bit `0x40` clear): an
+    /// off-but-connectable "Cnct. while Power OFF" camera we must decline rather than hold. Reset when a scan starts.
+    private var sawCameraOff = false
+    /// Bounded "wait for power-on" timer, armed once the camera is seen advertising off so a foreground scan doesn't run
+    /// forever against a camera that just sits there off. Fires → stop scanning and back off.
+    private var offWaitTimeout: DispatchWorkItem?
+    /// Last camera-on state logged during the current scan, so the raw advertisement is logged on change only (an
+    /// `allowDuplicates` scan fires many times a second).
+    private var lastAdvCameraOn: Bool?
+    /// Set when `willRestoreState` handed us a peripheral on this launch; consumed once by the next `beginDiscovery`,
+    /// which either resumes the link (if it survived) or backs off (never blindly reconnects — a restored *pending*
+    /// `connect()` is exactly the background "wake magnet" `docs/05` warns about).
+    private var didRestore = false
 
     /// How long a foreground scan may run before we give up quietly (never hold a scan open indefinitely).
     private static let scanTimeoutSeconds = 12.0
+    /// How long to keep scanning for a power-on after the camera is seen advertising off, before backing off. Bounds the
+    /// foreground battery cost of waiting out a camera the user left off.
+    private static let offWaitSeconds = 120.0
     private static let maxBondRetries = 3
 
     init(
@@ -89,21 +113,55 @@ final class CameraLink: NSObject, @unchecked Sendable {
         }
     }
 
+    /// Tracks app foreground/background so the power gate's fallback stays safe (see ``isForeground``).
+    func setForeground(_ active: Bool) {
+        queue.async { [self] in isForeground = active }
+    }
+
     func beginDiscovery() {
         queue.async { [self] in
             guard let manager, manager.state == .poweredOn else { return }
+
+            // Resume a state-restored link exactly once, deciding by whether it actually survived the relaunch.
+            if didRestore {
+                didRestore = false
+                if let peripheral, peripheral.state == .connected {
+                    // The link survived: re-discover services to repopulate the characteristic handles lost across
+                    // the relaunch, re-subscribe to notifications, and re-run the fw-gated handshake — then
+                    // geotagging continues as before (`didDiscoverServices` → `runHandshake` → `.ready`).
+                    log.notice("restore: link survived — re-discovering services to resume")
+                    stopScan()
+                    handshakeComplete = false
+                    peripheral.discoverServices([SonyCBUUID.locationService, SonyCBUUID.cameraControlService])
+                    return
+                }
+                // The link had dropped (camera in standby, or a connect that never completed). Anti-churn
+                // (docs/05 rule 1): do NOT re-issue a standing `connect()` — that pending intent is the background
+                // "wake magnet" the whole project exists to avoid. Cancel anything lingering, keep the camera
+                // identity for a later explicit Sync, and report a disconnect so the policy backs off.
+                log.notice("restore: link dropped — cancelling intent and backing off (no reconnect)")
+                if let peripheral { manager.cancelPeripheralConnection(peripheral) }
+                clearPeripheralState()
+                onEvent(.disconnected)
+                return
+            }
+
             // Politeness (docs/05 rule 2): adopt an already-connected peripheral instead of adding a redundant intent.
             let connected = manager.retrieveConnectedPeripherals(withServices: [SonyCBUUID.locationService])
             if let existing = connected.first {
                 adoptAndConnect(existing)
                 return
             }
-            if let id = knownIdentifier, let known = manager.retrievePeripherals(withIdentifiers: [id]).first {
-                adoptAndConnect(known)
-                return
-            }
-            // Foreground scan; company-ID filtering happens in `didDiscover`. Bounded so no scan is ever left running.
-            manager.scanForPeripherals(withServices: nil, options: [CBCentralManagerScanOptionAllowDuplicatesKey: false])
+            // Scan so the advertisement — including the `0x21` power/status bytes — is observed *before* we commit to a
+            // connect, instead of a blind `retrievePeripherals()` + `connect()` that re-links to an off-but-connectable
+            // "Cnct. while Power OFF" camera and holds it awake. The power gate lives in `didDiscover`. Duplicate reports
+            // are enabled (foreground-only; iOS ignores them in the background) so we see the camera's off→on transition
+            // and reconnect the instant it powers on. Bounded by `scheduleScanTimeout`.
+            sawCameraOff = false
+            lastAdvCameraOn = nil
+            offWaitTimeout?.cancel()
+            offWaitTimeout = nil
+            manager.scanForPeripherals(withServices: nil, options: [CBCentralManagerScanOptionAllowDuplicatesKey: true])
             scheduleScanTimeout()
         }
     }
@@ -126,6 +184,7 @@ final class CameraLink: NSObject, @unchecked Sendable {
             stopScan()
             // Cancel any in-flight (not-yet-established) connection so no standing intent survives into standby.
             if let peripheral, peripheral.state != .connected {
+                log.notice("backing off — cancelling pending connect intent")
                 manager?.cancelPeripheralConnection(peripheral)
             }
         }
@@ -161,15 +220,46 @@ final class CameraLink: NSObject, @unchecked Sendable {
     private func scheduleScanTimeout() {
         scanTimeout?.cancel()
         let item = DispatchWorkItem { [self] in
-            if peripheral == nil { stopScan() }
+            guard peripheral == nil, !sawCameraOff else { return } // connecting, or waiting out a known-off camera
+            stopScan()
+            // The scan surfaced no advertisement at all. In the foreground that means the camera isn't advertising
+            // (fully off / out of range, or a body that isn't connectable-while-off), so a direct connect is a harmless
+            // standing intent that iOS services on genuine power-on — background wake preserved. In the background the
+            // scan simply *can't* see manufacturer data, so we can't have run the power gate; declining to connect
+            // avoids blindly re-linking to (and draining) an off-but-connectable camera. Resume then waits for the
+            // foreground / an explicit Sync.
+            guard isForeground, let id = knownIdentifier,
+                  let known = manager?.retrievePeripherals(withIdentifiers: [id]).first else {
+                log.notice("scan surfaced no advertisement — backing off (no blind connect)")
+                onEvent(.disconnected)
+                return
+            }
+            log.notice("scan surfaced no advertisement — falling back to direct connect (known camera)")
+            adoptAndConnect(known)
         }
         scanTimeout = item
         queue.asyncAfter(deadline: .now() + Self.scanTimeoutSeconds, execute: item)
     }
 
+    /// Armed once the camera is seen advertising off: keep scanning (to catch a power-on) but not forever. On expiry,
+    /// stop and back off so a foreground scan doesn't burn the phone battery waiting out a camera left switched off.
+    private func scheduleOffWaitTimeout() {
+        offWaitTimeout?.cancel()
+        let item = DispatchWorkItem { [self] in
+            guard peripheral == nil else { return }
+            log.notice("camera stayed powered-off for \(Int(Self.offWaitSeconds))s — backing off")
+            stopScan()
+            onEvent(.disconnected)
+        }
+        offWaitTimeout = item
+        queue.asyncAfter(deadline: .now() + Self.offWaitSeconds, execute: item)
+    }
+
     private func stopScan() {
         scanTimeout?.cancel()
         scanTimeout = nil
+        offWaitTimeout?.cancel()
+        offWaitTimeout = nil
         if manager?.isScanning == true { manager?.stopScan() }
     }
 
@@ -192,6 +282,8 @@ final class CameraLink: NSObject, @unchecked Sendable {
         handshakeComplete = false
         bondRetries = 0
         powerNotifyRetries = 0
+        sawCameraOff = false
+        lastAdvCameraOn = nil
     }
 
     private func gracefulDisconnect() {
@@ -209,12 +301,32 @@ final class CameraLink: NSObject, @unchecked Sendable {
         clearPeripheralState()
     }
 
+    /// Integration-test hook (debug builds, opt-in via env `ALFA_TEST_ACCEPT_SIM=1`; never in the shipping app or a
+    /// normal debug launch). A mock camera (`AlfaCameraSim`) can't advertise Sony manufacturer data from macOS
+    /// CoreBluetooth, so when active, discovery accepts a peripheral that advertises the Sony **location service UUID**
+    /// instead. Read via `getenv` — not `ProcessInfo.environment`, which Foundation may snapshot — so an on-device
+    /// XCTest that calls `setenv` before creating the central reliably flips this on.
+    private static var testSimModeActive: Bool {
+        #if DEBUG
+        guard let raw = getenv("ALFA_TEST_ACCEPT_SIM") else { return false }
+        return String(cString: raw) == "1"
+        #else
+        return false
+        #endif
+    }
+
+    private static func advertisesLocationService(_ advertisementData: [String: Any]) -> Bool {
+        let advertised = advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID]
+        return advertised?.contains(SonyCBUUID.locationService) ?? false
+    }
+
     /// fw ≥3.02 gate: write `0x01` to DD30 then DD31 (skipped cleanly when the characteristics are absent).
     private func runHandshake() {
         guard let peripheral else { return }
         if let unlockChar { peripheral.writeValue(Data([0x01]), for: unlockChar, type: .withResponse) }
         if let enableChar { peripheral.writeValue(Data([0x01]), for: enableChar, type: .withResponse) }
         handshakeComplete = true
+        log.notice("ready — services + handshake complete")
         onEvent(.ready(id: peripheral.identifier, name: peripheral.name))
     }
 }
@@ -241,11 +353,20 @@ extension CameraLink: CBCentralManagerDelegate {
 
     #if os(iOS)
     func centralManager(_ central: CBCentralManager, willRestoreState dict: [String: Any]) {
+        // CoreBluetooth relaunched us (foreground or background) to hand back the peripheral(s) it was tracking on
+        // our behalf. Re-adopt the first — Phase 1 is single-camera — and re-attach as its delegate so callbacks
+        // resume. In-memory characteristic handles were lost across the relaunch; they are re-discovered when the
+        // link is resumed. The actual resume-or-back-off decision is deferred to `beginDiscovery` (via `didRestore`),
+        // where the manager is guaranteed powered on. `willRestoreState` is delivered *before*
+        // `centralManagerDidUpdateState`, so `didRestore` is always set before the reducer can trigger discovery.
         guard let restored = dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral],
               let restoredPeripheral = restored.first else { return }
         peripheral = restoredPeripheral
         restoredPeripheral.delegate = self
         knownIdentifier = restoredPeripheral.identifier
+        handshakeComplete = false
+        didRestore = true
+        log.notice("restore: willRestoreState — \(restored.count) peripheral(s), first state=\(restoredPeripheral.state.rawValue)")
     }
     #endif
 
@@ -256,24 +377,64 @@ extension CameraLink: CBCentralManagerDelegate {
         rssi RSSI: NSNumber
     ) {
         let manufacturerData = (advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data).map { [UInt8]($0) }
-        // Company-ID filter: only Sony advertisements.
-        guard let manufacturerData, SonyAdvertisement(manufacturerData: manufacturerData) != nil else { return }
+        let accept: Bool
+        if Self.testSimModeActive {
+            // Integration-test mode: accept ONLY the mock peripheral (advertises the location service UUID) and
+            // ignore real Sony cameras, so a physical A7R V in range can't win the discovery race during a test.
+            accept = Self.advertisesLocationService(advertisementData)
+        } else {
+            // Company-ID filter: only Sony advertisements.
+            accept = manufacturerData.map { SonyAdvertisement(manufacturerData: $0) != nil } ?? false
+        }
+        guard accept else { return }
+
+        let advertisement = manufacturerData.flatMap { SonyAdvertisement(manufacturerData: $0) }
+
+        // Raw-advertisement log, throttled to power-state changes (an `allowDuplicates` scan fires many times a second)
+        // for ongoing field diagnostics: `subsystem:me.congee.alfa`.
+        if let mfg = manufacturerData, advertisement?.isCameraOn != lastAdvCameraOn {
+            lastAdvCameraOn = advertisement?.isCameraOn
+            let hex = mfg.map { String(format: "%02X", $0) }.joined(separator: " ")
+            let g21 = advertisement?.powerGroupRaw?.map { String(format: "%02X", $0) }.joined(separator: " ") ?? "—"
+            let on = advertisement?.isCameraOn.map { $0 ? "on" : "off" } ?? "?"
+            log.notice("adv \(peripheral.name ?? "?", privacy: .public) mfg=[\(hex, privacy: .public)] group21=[\(g21, privacy: .public)] cameraOn=\(on, privacy: .public)")
+        }
+
         onEvent(.discovered(
             id: peripheral.identifier,
             name: peripheral.name,
             rssi: RSSI.intValue,
             manufacturerData: manufacturerData
         ))
-        // Phase 1 is single-camera: connect to the first Sony device seen, then stop scanning.
+
+        // Power gate (docs/05 reconnect crux, ✅ verified on A7R V fw 4.0): an advertisement reporting the camera OFF
+        // (`0x21` bit `0x40` clear) is an off-but-connectable "Cnct. while Power OFF" camera. Connecting would wake it
+        // and hold it awake — the exact drain this project fixes — so decline and keep scanning to reconnect the moment
+        // it powers on, bounded by `offWaitSeconds`. When the bit is absent (`isCameraOn == nil`: the test sim or an
+        // older/other body) we fall through and connect, preserving prior behaviour.
+        if advertisement?.isCameraOn == false {
+            if !sawCameraOff {
+                sawCameraOff = true
+                log.notice("advertisement reports camera OFF — declining connect (anti-drain), waiting up to \(Int(Self.offWaitSeconds))s for power-on")
+                scanTimeout?.cancel() // supersede the short "no advertisement" timeout with the bounded off-wait
+                scanTimeout = nil
+                scheduleOffWaitTimeout()
+            }
+            return
+        }
+
+        // Phase 1 is single-camera: connect to the first powered-on Sony device seen, then stop scanning.
         if self.peripheral == nil { adoptAndConnect(peripheral) }
     }
 
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         // Location service drives geotagging; the Camera Control service (CC05) is a best-effort standby signal.
+        log.notice("connected — discovering services")
         peripheral.discoverServices([SonyCBUUID.locationService, SonyCBUUID.cameraControlService])
     }
 
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
+        log.notice("connect failed: \(error?.localizedDescription ?? "unknown", privacy: .public)")
         clearPeripheralState()
         onEvent(.connectFailed)
     }
@@ -284,6 +445,7 @@ extension CameraLink: CBCentralManagerDelegate {
         error: Error?
     ) {
         // Anti-churn: deliberately do NOT reconnect here. Report and let the policy decide (it backs off).
+        log.notice("disconnected: \(error?.localizedDescription ?? "clean", privacy: .public)")
         clearPeripheralState()
         onEvent(.disconnected)
     }
@@ -372,7 +534,13 @@ extension CameraLink: CBPeripheralDelegate {
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
         guard error == nil, let value = characteristic.value else { return }
-        onEvent(.notify(characteristic: characteristic.uuid.uuidString, value: [UInt8](value)))
+        let bytes = [UInt8](value)
+        // Log the raw notify/read value at the lifecycle seam so the camera's actual CC05 power-state behaviour is
+        // observable in the device log (Console.app / `log collect`, filter `subsystem:me.congee.alfa`) — the only way
+        // to see what the A7R V really reports for standby/power-off without a debugger. CC05/DD01 carry no PII.
+        let hex = bytes.map { String(format: "%02X", $0) }.joined(separator: " ")
+        log.notice("notify \(characteristic.uuid.uuidString, privacy: .public) = \(hex, privacy: .public)")
+        onEvent(.notify(characteristic: characteristic.uuid.uuidString, value: bytes))
     }
 
     func peripheral(

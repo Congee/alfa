@@ -57,6 +57,12 @@ public struct ConnectionPolicy: Sendable, Equatable {
     /// Minimum time (seconds) between location pushes while connected. `0` disables the interval throttle (push is
     /// then governed by distance alone). Complements `minimumDistanceMeters` — both gates must clear.
     public var minimumIntervalSeconds: TimeInterval
+    /// Keep-alive: the maximum time (seconds) the camera's location fix may go without a refresh before it silently
+    /// expires ("Location information cannot be obtained"). Once this elapses since the last write, the next
+    /// opportunity re-pushes regardless of movement — while stationary via the heartbeat, while moving via the
+    /// location gate (pushing the *fresh* position). `0` disables the keep-alive. Must stay below the camera-side
+    /// timeout (`docs/08` IT-11 measures it); default matches Sony's own ~10 s cadence (`docs/07`).
+    public var keepAliveSeconds: TimeInterval
     /// Keep the link while the camera is powered on (fresh per-shot geotags).
     public var stayConnectedWhileCameraOn: Bool
     /// Never hold a standing `connect()` or auto-reconnect while the camera is in standby.
@@ -65,20 +71,24 @@ public struct ConnectionPolicy: Sendable, Equatable {
     public init(
         minimumDistanceMeters: Double,
         minimumIntervalSeconds: TimeInterval = 0,
+        keepAliveSeconds: TimeInterval = 10,
         stayConnectedWhileCameraOn: Bool,
         backOffInStandby: Bool
     ) {
         self.minimumDistanceMeters = minimumDistanceMeters
         self.minimumIntervalSeconds = minimumIntervalSeconds
+        self.keepAliveSeconds = keepAliveSeconds
         self.stayConnectedWhileCameraOn = stayConnectedWhileCameraOn
         self.backOffInStandby = backOffInStandby
     }
 
     /// The locked Phase 1 default (decision D4): connected while on, fully backed off in standby. The interval
-    /// throttle is off by default (distance-only), matching the pre-settings behavior.
+    /// throttle is off by default (distance-only), matching the pre-settings behavior; the 10 s keep-alive prevents
+    /// the camera from expiring a fix while the phone is stationary or moving slowly.
     public static let balanced = ConnectionPolicy(
         minimumDistanceMeters: 25,
         minimumIntervalSeconds: 0,
+        keepAliveSeconds: 10,
         stayConnectedWhileCameraOn: true,
         backOffInStandby: true
     )

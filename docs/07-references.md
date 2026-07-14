@@ -47,6 +47,24 @@ decompiled Sony code.
   with `--user`/`--pass`; `[AUTH] ... ssh support is on`). Uses Sony's closed SDK. Unsolved by open source, and
   irrelevant to a BLE app.
 
+## Sony Camera Remote SDK (evaluated 2026-07-14 — not applicable)
+
+CrSDK v2.02.00 was unzipped and assessed against Alfa's iOS + BLE + avoid-Wi-Fi constraints. **Verdict: irrelevant
+for implementation, and not even a useful BLE protocol reference.**
+
+- **Platform:** desktop only (Windows/Linux/macOS) — ships `libCr_Core.dylib`, `libCr_PTP_USB.dylib`,
+  `libCr_PTP_IP.dylib`; **no iOS/Android** artifacts (no `.framework`/`.xcframework`). Cannot be linked into a Swift
+  iOS app. (`api_ref/html/other/compatibility.html`.)
+- **Transports:** **USB + Ethernet (wired/wireless LAN) only.** No Bluetooth path — "Bluetooth" appears once, telling
+  you to *turn it off* to avoid Wi-Fi interference; zero `GATT`. Its command layer is **PTP-over-USB/IP**, a different
+  wire protocol from the camera's BLE GATT services.
+- **Features:** has time-zone/clock sync (`CrTimeZoneSetting` → `CrDateTimeSetting` + `CrAreaSetting`) but **no
+  GPS/location-write API** — the exact opposite of what Alfa needs from BLE. A7R V (ILCE-7RM5) is supported over
+  USB/wired-Ethernet.
+- **Only residual value:** the `CrTimeZoneSetting`/`CrDateTimeSetting`/`CrAreaSetting` data model is a minor
+  *conceptual* cross-check that Sony separates date/time vs. area/DST — consistent with Alfa's verified `CC13`
+  (local wall-clock + base offset + DST) and the `DD11` tz/dst block. Not needed, just corroborating.
+
 ## Apple / CoreBluetooth
 
 - `CBCentralManager.connect(_:options:)` docs — "attempts to connect... don't time out."
@@ -64,5 +82,5 @@ decompiled Sony code.
 
 ## Confidence caveats to re-verify on the A7R V
 
-Zoom vs. focus opcodes (🔴), advertisement bit `0x40` paired-vs-pairing (🔴), `DD21` tz bit (🟡), `EE01` payload (🟡),
-`CC13` applicability (🟡). See `03-ble-protocol.md`.
+Zoom vs. focus opcodes (🔴), advertisement bit `0x40` paired-vs-pairing (🔴), `DD21` tz bit (🟡), `EE01` payload (🟡).
+(`CC13` applicability — ✅ verified on the A7R V, `docs/08` IT-4.) See `03-ble-protocol.md`.

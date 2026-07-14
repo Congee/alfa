@@ -3,7 +3,9 @@ import Testing
 @testable import SonyBLE
 
 /// Tests for the pure Balanced-policy reducer. These pin the **anti-churn invariants** that are the reason the project
-/// exists: a disconnect / failed connect / standby location update must never produce a new connect or scan.
+/// exists: a failed connect, a CC05 standby bail, or a location update while backed off must never produce a new
+/// connect or scan. (A *genuinely* dropped `.connected` link does re-arm a standing connect — foreground or background
+/// — so the camera resumes on power-on; the guard is that a disconnect following a standby bail is not `.connected`.)
 @Suite("Balanced policy reducer")
 struct GeotagPolicyTests {
     let engine = GeotagPolicyEngine(config: .balanced)
@@ -16,11 +18,13 @@ struct GeotagPolicyTests {
         LocationFix(latitude: latitude, longitude: longitude, timestamp: Date(timeIntervalSince1970: seconds), horizontalAccuracyMeters: 5)
     }
 
-    /// Engine that also enforces a 30 s minimum interval between pushes (distance stays at the balanced 25 m).
+    /// Engine that also enforces a 30 s minimum interval between pushes (distance stays at the balanced 25 m). The
+    /// keep-alive is disabled here so these tests isolate the interval gate (otherwise expiry would push first).
     private var intervalEngine: GeotagPolicyEngine {
         GeotagPolicyEngine(config: ConnectionPolicy(
             minimumDistanceMeters: 25,
             minimumIntervalSeconds: 30,
+            keepAliveSeconds: 0,
             stayConnectedWhileCameraOn: true,
             backOffInStandby: true
         ))
@@ -61,18 +65,10 @@ struct GeotagPolicyTests {
         #expect(state.connection == .scanning)
     }
 
-    @Test("A disconnect never triggers a reconnect (core anti-churn guard)")
-    func disconnectNeverReconnects() {
-        var state = enabledAndConnected()
-        let actions = engine.reduce(&state, .disconnected)
-        #expect(actions.isEmpty)
-        #expect(state.connection == .backedOff)
-    }
-
     @Test("A location update while backed off does nothing")
     func locationWhileBackedOffDoesNothing() {
         var state = enabledAndConnected()
-        _ = engine.reduce(&state, .disconnected)
+        _ = engine.reduce(&state, .cameraPoweredOff) // deliberate standby → backed off (a genuine drop would reconnect)
         let actions = engine.reduce(&state, .location(fix(1, 1)))
         #expect(actions.isEmpty)
         #expect(state.connection == .backedOff)
@@ -113,10 +109,10 @@ struct GeotagPolicyTests {
         #expect(engine.reduce(&state, .location(far)) == [.pushLocation(far)])
     }
 
-    @Test("An explicit sync request is the only way out of back-off")
+    @Test("An explicit sync request is a way out of back-off")
     func syncRequestLeavesBackOff() {
         var state = enabledAndConnected()
-        _ = engine.reduce(&state, .disconnected)
+        _ = engine.reduce(&state, .cameraPoweredOff) // standby bail → backed off, no auto-reconnect
         #expect(state.connection == .backedOff)
         let actions = engine.reduce(&state, .syncRequested)
         #expect(actions == [.beginDiscovery])
@@ -168,5 +164,118 @@ struct GeotagPolicyTests {
 
         // 100 s later but essentially stationary (~1 m) → distance gate fails → no push.
         #expect(engine.reduce(&state, .location(fix(0, 0.00001, at: 100))).isEmpty)
+    }
+
+    // MARK: - Keep-alive heartbeat
+
+    @Test("A heartbeat while connected re-pushes the last position with a fresh timestamp")
+    func heartbeatRepushesWhileConnected() {
+        var state = connectedState(engine, latest: fix(1, 2, at: 0))
+        // Nothing has moved since connect; the heartbeat re-sends the same position, restamped to `now`.
+        let actions = engine.reduce(&state, .heartbeat(now: Date(timeIntervalSince1970: 10)))
+        #expect(actions == [.pushLocation(fix(1, 2, at: 10))])
+    }
+
+    @Test("A heartbeat does not advance the movement gate (it is not a real push)")
+    func heartbeatDoesNotAdvanceGate() {
+        var state = connectedState(engine, latest: fix(0, 0, at: 0)) // real lastPushed = (0,0)
+        _ = engine.reduce(&state, .heartbeat(now: Date(timeIntervalSince1970: 2)))
+
+        // A near fix, still within the keep-alive window (no expiry), stays below the 25 m gate relative to the *real*
+        // last push → no push.
+        #expect(engine.reduce(&state, .location(fix(0, 0.00001, at: 3))).isEmpty)
+        // A far fix still pushes → the distance reference was untouched by the heartbeat.
+        let far = fix(0, 0.001, at: 4)
+        #expect(engine.reduce(&state, .location(far)) == [.pushLocation(far)])
+    }
+
+    @Test("A heartbeat never issues a write while disconnected or before any push (never wakes standby)")
+    func heartbeatDoesNothingWhenNotPushing() {
+        // Connected but nothing pushed yet (no latest) → no lastPushed → nothing to keep alive.
+        var state = enabledAndConnected()
+        #expect(engine.reduce(&state, .heartbeat(now: Date(timeIntervalSince1970: 10))).isEmpty)
+
+        // Backed off after a standby bail → a heartbeat must not produce a write (anti-churn).
+        _ = engine.reduce(&state, .cameraPoweredOff)
+        #expect(engine.reduce(&state, .heartbeat(now: Date(timeIntervalSince1970: 20))).isEmpty)
+        #expect(state.connection == .backedOff)
+    }
+
+    @Test("A slow move under the distance gate still pushes the fresh fix once the keep-alive window elapses")
+    func expiryPushesFreshWhileMovingSlowly() {
+        var state = connectedState(engine, latest: fix(0, 0, at: 0)) // lastPushed = (0,0), lastWriteAt = 0
+        // ~1 m move within the keep-alive window → still gated (distance + not yet stale).
+        #expect(engine.reduce(&state, .location(fix(0, 0.00001, at: 5))).isEmpty)
+        // ~2 m move but ≥10 s (keepAliveSeconds) since the last write → expiry forces the *fresh* fix through.
+        let fresh = fix(0, 0.00002, at: 10)
+        #expect(engine.reduce(&state, .location(fresh)) == [.pushLocation(fresh)])
+    }
+
+    @Test("Keep-alive overrides the interval throttle (a fix must never be allowed to expire)")
+    func keepAliveOverridesInterval() {
+        let engine = GeotagPolicyEngine(config: ConnectionPolicy(
+            minimumDistanceMeters: 25,
+            minimumIntervalSeconds: 60,
+            keepAliveSeconds: 10,
+            stayConnectedWhileCameraOn: true,
+            backOffInStandby: true
+        ))
+        var state = connectedState(engine, latest: fix(0, 0, at: 0))
+        // Moved far but only 10 s later: the 60 s interval blocks it as a *movement* push — yet the 10 s keep-alive
+        // forces the write through, because letting the fix expire is never acceptable.
+        let far = fix(0, 0.001, at: 10)
+        #expect(engine.reduce(&state, .location(far)) == [.pushLocation(far)])
+    }
+
+    // MARK: - Reconnect (foreground and background)
+
+    @Test("A genuinely dropped link reconnects — foreground OR background (power-on recovery)")
+    func genuineDropReconnects() {
+        var state = enabledAndConnected() // background by default: reconnect must still fire
+        let actions = engine.reduce(&state, .disconnected)
+        #expect(actions == [.beginDiscovery])
+        #expect(state.connection == .scanning)
+    }
+
+    @Test("A CC05 standby bail does not reconnect (no wake-magnet loop)")
+    func standbyBailDoesNotReconnect() {
+        var state = enabledAndConnected()
+        // Camera reports standby → back off + tear down. The teardown itself produces a disconnect...
+        let off = engine.reduce(&state, .cameraPoweredOff)
+        #expect(off.contains(.cancelDiscoveryAndDisconnect))
+        #expect(state.connection == .backedOff)
+        // ...and that follow-on disconnect must NOT reconnect (backed off, not connected) — else we'd churn.
+        let after = engine.reduce(&state, .disconnected)
+        #expect(after.isEmpty)
+        #expect(state.connection == .backedOff)
+    }
+
+    @Test("Returning to the foreground retries from back-off")
+    func foregroundReturnRetriesFromBackOff() {
+        var state = enabledAndConnected()
+        _ = engine.reduce(&state, .cameraPoweredOff) // → backedOff (a standby bail)
+        #expect(state.connection == .backedOff)
+        let actions = engine.reduce(&state, .setForeground(true))
+        #expect(actions == [.beginDiscovery])
+        #expect(state.connection == .scanning)
+    }
+
+    @Test("Backgrounding keeps a pending connect armed (background reconnect stays live)")
+    func backgroundingKeepsPendingConnect() {
+        var state = GeotagState()
+        state.bluetoothReady = true
+        _ = engine.reduce(&state, .setEnabled(true)) // → scanning (+ beginDiscovery)
+        #expect(state.connection == .scanning)
+        let actions = engine.reduce(&state, .setForeground(false))
+        #expect(actions.isEmpty) // not cancelled
+        #expect(state.connection == .scanning) // still pursuing the link in the background
+    }
+
+    @Test("Backgrounding keeps a live connection (background geotagging continues)")
+    func backgroundingKeepsLiveConnection() {
+        var state = enabledAndConnected()
+        let actions = engine.reduce(&state, .setForeground(false))
+        #expect(actions.isEmpty)
+        #expect(state.connection == .connected)
     }
 }

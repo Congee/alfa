@@ -31,19 +31,34 @@ The core of the project. Deliver GPS + time sync **and** the "good BLE citizen" 
 - [x] Observe `CC05` power-state (Camera Control service `8000CC00`) to feed the policy's `cameraPoweredOff` input:
       conservative pure parser (`CameraPowerState`, host-tested), subscribed + read on connect, best-effort (falls back
       to disconnect-inferred standby when the characteristic is absent).
-- [~] Background operation: `bluetooth-central` + Location "Always" background modes wired; `CBCentralManager` restore
-      identifier + `willRestoreState` handled; bonded UUID persisted/retrieved. *TODO: full background-relaunch /
-      state-restoration flow (re-drive the policy from `willRestoreState`).*
+- [x] Background operation + state restoration: `bluetooth-central` + Location "Always" background modes wired;
+      `CBCentralManager` created with a restore identifier; an `AppDelegate` (`didFinishLaunchingWithOptions`)
+      re-creates the central on launch so iOS delivers `willRestoreState` on a background relaunch. The restored link
+      is resumed **only if it survived** (re-discover services → re-subscribe → re-run handshake → continue); a
+      restored-but-dropped/pending link is **not** blindly reconnected — the pending `connect()` "wake magnet" is
+      cancelled and the policy backs off (anti-churn, `docs/05` rule 1). The enabled/disabled state is persisted so a
+      relaunch resumes non-interactively (no permission prompts). *Mechanics validated on-device per
+      `08-integration-testing.md`.*
+- [x] Keep-alive + foreground reconnect: a ~10 s keep-alive re-pushes the last position while connected so the camera
+      never expires its fix (`docs/05`; the camera signals expiry over no BLE characteristic, so it is prevented via a
+      write-timeline-driven timer that adds no redundant writes while moving); and a genuinely dropped link is
+      re-established automatically **in the foreground *and* background** (standing `connect()` serviced on the
+      camera's next power-on, relaunching via state restoration if suspended). A CC05 standby bail never re-arms (no
+      wake-magnet loop). *The connect/handshake/push and CC05-standby-bail paths are covered by a two-radio on-device
+      integration harness (`Tools/ble-integration/`: mock camera on the Mac, real central on the device under
+      `xcodebuild test`) — both PASS. Power-cycle reconnect (a link-drop a macOS peripheral can't emulate) and fix-expiry
+      stay covered by the pure-reducer host tests + on-device logs (`08` IT-11/IT-12).*
 - [x] SwiftUI UI: tab shell (Home / Settings / Help); pairing + permissions onboarding flow (Bluetooth →
       Location When-in-use→Always → camera-prep checklist → pair → done); status (connection, camera indicator,
       Bluetooth + location access, fixes pushed, last fix, errors); enable/disable, "Sync now", "Forget camera"
       (confirmation dialog). *TODO: multi-camera list, camera battery if reported.*
 - [x] Settings + time sync: customisable update distance + interval (persisted, `GeotagSettings`); Time Correction
-      (CC13 clock write, beta 🟡) + Time Area Correction (tz/dst block) toggles; in-app Help/Troubleshooting +
+      (CC13 clock write — ✅ A7R V-verified, IT-4) + Time Area Correction (tz/dst block) toggles; in-app Help/Troubleshooting +
       compatibility. *(feature parity with Geotag Alpha's Phase-1 geotag surface; multi-camera + update-on-focus
       remain deferred — see D3/OQ4 and Phase 2.)*
-- [ ] On-device validation on A7R V fw 4.0, including the standby-drain success criterion **and** verifying the
-      CC13 clock/tz assumption (`SonyTimePacket` — flip to UTC-based fields if wrong).
+- [~] On-device validation on A7R V fw 4.0 (`08-integration-testing.md`): **IT-2 pair ✅**, **IT-4 CC13 clock ✅
+      verified** (local-wall-clock interpretation correct — no UTC flip needed). *Remaining: the standby-drain
+      success criterion (IT-10, Rig B/iPhone), IT-5 CC05 standby, IT-7 state restoration, IT-4 tz sub-test.*
 
 ## Phase 2 — Remote control (foreground)
 

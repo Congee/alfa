@@ -2,8 +2,14 @@ import AlfaGeotag
 import SwiftUI
 
 struct ContentView: View {
-    @State private var coordinator = GeotagCoordinator()
+    @State private var coordinator: GeotagCoordinator
     @State private var showOnboardingManually = false
+
+    /// The coordinator is created and owned by `AppDelegate` (so it exists for the app-launch state-restoration hook)
+    /// and injected here as `@State`'s initial value, keeping a single instance across the view tree.
+    init(coordinator: GeotagCoordinator) {
+        _coordinator = State(initialValue: coordinator)
+    }
 
     var body: some View {
         TabView {
@@ -31,5 +37,5 @@ struct ContentView: View {
 }
 
 #Preview {
-    ContentView()
+    ContentView(coordinator: GeotagCoordinator())
 }

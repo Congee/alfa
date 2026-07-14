@@ -78,6 +78,10 @@ final class LocationProvider: NSObject, @unchecked Sendable {
     func start() {
         #if os(iOS)
         manager.allowsBackgroundLocationUpdates = true
+        // Let iOS auto-pause location when it detects we're stationary — that's the battery-smart default and we don't
+        // fight it. Keeping the camera's fix alive is decoupled from location *delivery*: the coordinator's keep-alive
+        // heartbeat re-pushes the last cached fix on its own timer regardless of whether new samples are arriving. So
+        // the camera never expires its fix, and we don't burn GPS holding a link to fresh location we aren't moving to.
         manager.pausesLocationUpdatesAutomatically = true
         #endif
         manager.startUpdatingLocation()

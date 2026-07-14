@@ -15,7 +15,8 @@
 ```
 Alfa/
 ├── App/                      # iOS app target (SwiftUI). Thin. No protocol logic; names no SonyBLE types.
-│   ├── AlfaApp.swift
+│   ├── AlfaApp.swift         # @main; @UIApplicationDelegateAdaptor → AppDelegate
+│   ├── AppDelegate.swift     # owns the shared GeotagCoordinator; launch hook for BLE state restoration
 │   ├── ContentView.swift     # tab shell (Home/Settings/Help) + first-run onboarding cover
 │   ├── HomeView.swift        # status + enable/sync/forget
 │   ├── OnboardingView.swift  # permissions + camera-prep + pairing flow
@@ -92,7 +93,15 @@ their queue.
    exists. When the camera goes to standby, tear down and back off (see `05-battery-strategy.md`). Standby is detected
    **proactively** from the `CC05` power-state notification, falling back to the CoreBluetooth disconnect when `CC05`
    is absent — both feed the pure reducer's `cameraPoweredOff`/`disconnected` inputs, which never auto-reconnect.
-5. **Background:** `bluetooth-central` + Location "Always"; opt into CoreBluetooth state restoration deliberately.
+5. **Background + state restoration:** `bluetooth-central` + Location "Always" background modes; the
+   `CBCentralManager` is created with a restore identifier. When iOS relaunches the app to service a BLE event,
+   `AppDelegate.application(_:didFinishLaunchingWithOptions:)` calls `GeotagCoordinator.resumeIfPreviouslyEnabled()`
+   (a persisted enabled flag), which re-creates the central so `willRestoreState` is delivered. `CameraLink` re-adopts
+   the restored peripheral and defers the decision to the next `beginDiscovery`: if the link **survived** it
+   re-discovers services (repopulating characteristic handles lost across the relaunch), re-subscribes, and re-runs
+   the handshake; if it **dropped or was still pending**, it cancels the connect intent and reports a disconnect so
+   the pure reducer backs off — never blindly reconnecting (the pending `connect()` "wake magnet" of `05` rule 1).
+   Resume is non-interactive: it requests no permission prompts and reuses whatever access was already granted.
 6. **Permissions / onboarding:** a first-run flow requests Bluetooth, then Location "While Using", walks the camera
    prep checklist, pairs, and finally escalates to Location "Always" (per Apple's/Geotag Alpha's two-step guidance).
    `GeotagCoordinator` exposes fine-grained `BluetoothAvailability`/`LocationAuthorization` as primitive helpers so the

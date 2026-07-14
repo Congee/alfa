@@ -125,13 +125,14 @@ every ~3 s while the feature reads inactive. Remote-service protocol errors retu
 Not required for Phase 1's core, but `CC05` power-state observation is useful for the "camera is on/off" signal that
 drives the Balanced battery policy.
 
-**`CC13` — implemented (beta, 🟡).** `SonyTimePacket` (`SonyProtocol/TimePacket.swift`) encodes this layout and the
-BLE layer writes it best-effort on connect when the "Time Correction" setting is on and the characteristic is present
-(clean no-op otherwise). **Unverified assumption:** the date/time fields are treated as **local wall-clock** and the
-offset fields as the **base** UTC offset (`total − dst`), with DST reported separately. If on-device testing shows the
-camera expects UTC-based fields, switch the derivation in `SonyTimePacket.init(date:timeZone:)` to a UTC calendar —
-an isolated change. (Time-zone sync itself does not depend on CC13: it rides the DD11 tz/dst block, gated by the
-"Time Area Correction" setting.)
+**`CC13` — implemented and ✅ verified on the A7R V (fw 4.0).** `SonyTimePacket` (`SonyProtocol/TimePacket.swift`)
+encodes this layout and the BLE layer writes it best-effort on connect when the "Time Correction" setting is on and
+the characteristic is present (clean no-op otherwise). **Confirmed** (`docs/08` IT-4, 2026-07-14): with a wrong camera
+clock and the toggle on, the clock lands correct — so the interpretation is right: date/time fields are **local
+wall-clock** and the offset fields are the **base** UTC offset (`total − dst`), with DST reported separately. (The
+13-byte layout still traces to a single RE source for its *structure*; behaviour is now A7R V-confirmed. Time-zone
+sync itself does not depend on CC13: it rides the DD11 tz/dst block, gated by the "Time Area Correction" setting —
+the tz-change sub-test is IT-4 step 1, not yet run.)
 
 ## Pairing service `8000EE00` 🟡
 
@@ -156,10 +157,30 @@ Most prior art skips this and relies on OS bonding. Confirm the payload length o
 - Tag `0x22` flag bits (gethypoxic): PairingSupported `0x80`, PairingEnabled/Paired `0x40`, LocationSupported `0x20`,
   LocationEnabled `0x10`, RemoteFunctionEnabled `0x02`. 🟡
 - 🔴 **Ambiguity:** whc2001 reads bit `0x40` as "Paired/bonded"; gethypoxic/freemote read it as "PairingEnabled/
-  discoverable now." These are different states. If Alfa uses adverts to distinguish *standby-reconnect* from *active-
-  pairing* (relevant to battery logic), **capture the A7R V's adverts in both states and confirm.**
+  discoverable now." These are different states.
 - Note: alpha-gps / AlphaSync / swremote don't parse these bits at all — they filter only on company ID and let the OS
   handle bonding. That's the safe default for Phase 1.
+
+### Tag `0x21` power/connectivity group ✅ (verified A7R V fw 4.0, 2026-07-14)
+
+**This is Alfa's power on/off discriminator** (`docs/05` rule 8), since `CC05` is silent on this body and no GATT
+characteristic signals power-off. Flag bits (gethypoxic + whc2001; used operationally by `ekutner/camera-gps-link`):
+WirelessPowerOnEnabled `0x80` ("Cnct. while Power OFF"), **CameraOn `0x40`**, WifiHandoverSupported `0x20`,
+WifiHandoverEnabled `0x10`.
+
+Real A7R V captures ("Cnct. while Power OFF" enabled throughout, so `0x80` stays set; the model code reads `"U1"` here,
+not `"E1"`). The status area is a run of **fixed 3-byte TLV groups from offset 8**, and the groups present/shift with
+power state — so parse by **walking the groups**, not a fixed index:
+
+| Lever | Manufacturer data | `0x21` flags | `CameraOn` (`0x40`) |
+|-------|-------------------|--------------|---------------------|
+| **On** | `2D01 030065 00 5531 22BA00 2396AC 21F000` | `0xF0` | **set** |
+| **Off** | `2D01 030065 00 5531 21B002 23B7AC` | `0xB0` | **clear** |
+
+Powered-on advertises a `0x22` group *before* `0x21`; powered-off drops the `0x22` group entirely and leads with
+`0x21`. `SonyAdvertisement` decodes this (`isCameraOn`, `connectsWhilePoweredOff`) with host tests pinning both frames.
+**Note:** iOS delivers `CBAdvertisementDataManufacturerDataKey` only to **foreground** scans — background scans can't
+read these bits, which is why the reconnect gate is a foreground behaviour (`docs/05` rule 8).
 
 ## iOS pairing/bonding trick ✅
 
@@ -170,7 +191,9 @@ at ~3 s intervals; drop the gate subscription once bonded. (From alpha-gps `IosB
 ## Things to verify on the A7R V before relying on them
 
 1. 🔴 Zoom vs. manual-focus opcode groups and step byte.
-2. 🔴 Advertisement tag `0x22` bit `0x40` (paired vs. pairing-enabled).
+2. 🔴 Advertisement tag `0x22` bit `0x40` (paired vs. pairing-enabled). *(Tag `0x21` power bits are ✅ verified — see
+   "Tag `0x21` power/connectivity group" above.)*
 3. 🟡 `DD21` tz/dst-required bit.
 4. 🟡 `EE01` pairing payload (if used at all).
-5. 🟡 `CC13` time-sync applicability on the A7R V (vs. the location-packet's embedded time).
+5. ✅ `CC13` time-sync on the A7R V — **verified** (fw 4.0, `docs/08` IT-4): the clock syncs correctly with the
+   local-wall-clock interpretation.

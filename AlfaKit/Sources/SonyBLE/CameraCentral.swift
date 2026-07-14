@@ -77,6 +77,13 @@ public actor CameraCentral {
         apply(engine.reduce(&state, .setEnabled(enabled)))
     }
 
+    /// Reports app foreground/background transitions. Foreground enables automatic reconnection when a live link
+    /// drops; backgrounding cancels any pending connect so none survives as a wake-magnet (a live link is kept).
+    public func setForeground(_ active: Bool) {
+        link?.setForeground(active) // keep the power gate's fallback background-safe (CameraLink.isForeground)
+        apply(engine.reduce(&state, .setForeground(active)))
+    }
+
     public func submitLocation(_ fix: LocationFix) {
         apply(engine.reduce(&state, .location(fix)))
     }
@@ -84,6 +91,13 @@ public actor CameraCentral {
     /// The sanctioned, explicit trigger to leave back-off and re-establish the link (e.g. a "Sync now" button).
     public func requestSync() {
         apply(engine.reduce(&state, .syncRequested))
+    }
+
+    /// Keep-alive tick, driven by the coordinator's heartbeat timer while connected: re-sends the last pushed position
+    /// (restamped) so the camera never expires its location. A clean no-op unless connected with a prior push — it
+    /// never issues a write that could wake a standby camera.
+    public func heartbeat() {
+        apply(engine.reduce(&state, .heartbeat(now: Date())))
     }
 
     /// Applies new connection thresholds (update distance / interval) at runtime. Recreates the pure engine with the

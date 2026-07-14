@@ -52,10 +52,55 @@ cheap and expected — the camera radio is already awake.
    every N seconds.
 5. **Gate fast-reconnect off in standby.** If auto-reconnect is used at all, disable it whenever the camera is in
    "Control while Power OFF" standby (mirror Geotag Alpha's mitigation).
-6. **Detect on/off, don't guess.** Use the `CC05` power-state characteristic and/or advertisement/notification signals
-   to know whether the camera is genuinely on before committing to a persistent link.
+6. **Detect on/off from the advertisement, don't guess.** Read the camera's power state from the `0x21` advertisement
+   group (bit `0x40` = on) *before* committing to a link (rule 8). `CC05` is kept as a best-effort post-connect fallback
+   for bodies that report it, but it is **silent on the A7R V** and no Sony GATT characteristic signals power-off, so the
+   advertisement is the source of truth.
 7. **Be a single, polite central.** Educate the user that running Alfa alongside Creators'/Imaging Edge/other remote
    apps re-creates the multi-suitor churn — the camera tolerates only one clean active link.
+8. **Reconnect only to a camera that advertises *powered-on* (the advertisement power gate).** When a genuinely
+   established link drops, re-establish it by **scanning and inspecting the advertisement**, not by a blind standing
+   `connect()`. Connect only when the advertisement's `0x21` power group reports the camera on (bit `0x40`); an
+   advertisement reporting *off* is an off-but-connectable "Cnct. while Power OFF" camera, so Alfa **declines** and
+   keeps scanning briefly (bounded, `CameraLink.offWaitSeconds`) to reconnect the instant it powers on, then backs off.
+   This is what makes the reconnect safe: Alfa never wakes or holds an off camera, because it never connects to one.
+
+   > **Why not `CC05`?** The original design bailed on standby via the `CC05` power-state characteristic. On the A7R V
+   > (fw 4.0) `CC05` is **silent** — no notification and no read response (verified on-device 2026-07-14, `docs/08`
+   > IT-12), and a lever-off produces a plain `disconnected` with no power-off event of any kind. This is universal
+   > across the Sony-BLE OSS ecosystem: **no GATT characteristic signals power-off.** The only reliable discriminator is
+   > the **advertisement**: `0x21` bit `0x40` reads `0xF0` powered-on and `0xB0` powered-off (verified both directions on
+   > the A7R V; independently documented by gethypoxic/whc2001 and used operationally by `ekutner/camera-gps-link`).
+
+   **Foreground vs background.** The gate needs the advertisement's manufacturer data, which iOS delivers only to a
+   **foreground** scan. So reliable resume-on-power-on is a foreground (or explicit "Sync now") behaviour. A background
+   scan can't inspect the advertisement, so Alfa deliberately does **not** blind-connect from the background (that would
+   re-link to and drain an off-but-connectable camera); it backs off instead and resumes on the next foreground/Sync.
+   The one blind `connect()` still allowed is the foreground fallback when the scan sees **no** advertisement at all
+   (camera fully off / out of range, i.e. *not* connectable-while-off) — a harmless standing intent iOS services on real
+   power-on, which also survives into the background to give power-on resume for the well-behaved (Cnct-OFF) config.
+   Net trade-off: with "Cnct. while Power OFF" **enabled**, background auto-resume is traded away to guarantee zero
+   drain — another reason Alfa nudges the user to disable that setting (below), which restores full, safe background
+   resume. *(✅ Resolved on-device 2026-07-14 — replaces the abandoned CC05 standby bail.)*
+
+### Keep the camera's fix alive while connected (staleness ≠ churn)
+
+Separately from connection churn, the camera **silently expires** a location fix that stops being refreshed (the
+"Location information cannot be obtained" overlay) and announces that over no BLE characteristic — so it must be
+*prevented*, not reacted to. While connected, Alfa re-pushes the last position on a ~10 s keep-alive (matching Sony's
+own cadence) whenever nothing else has written for that long — driven off the write timeline, so a moving phone that is
+already pushing never adds redundant writes. This is orthogonal to the anti-churn rules above: it only ever runs on an
+*established* link and never issues a connect. (Timeout measured on-device: `08` IT-11.)
+
+### State restoration is part of the fix, not a loophole in it
+
+Opting into CoreBluetooth state restoration (a restore identifier + `willRestoreState`) is what lets Alfa *cancel* a
+standing intent that outlived termination. iOS relaunches the app to service a pending `connect()`; on that relaunch
+Alfa re-adopts the peripheral and, **only if the link actually survived**, resumes it. A restored-but-dropped or
+still-pending link is deliberately **not** reconnected — the pending `connect()` is cancelled and the policy backs
+off. Without restoration, a standing intent held at termination would become a permanent background wake magnet with
+no chance to cancel it; with restoration, every relaunch is an opportunity to tear it down cleanly. The enabled state
+is persisted so the resume is automatic and non-interactive (no permission prompts on a background launch).
 
 ### Consider AccessorySetupKit (OQ3)
 

@@ -38,6 +38,19 @@ struct SettingsView: View {
                         + "it ignore it). Time Area Correction sends your time zone with each location. Your camera's "
                         + "own Auto Time Correction / Auto Area Adjust settings decide whether to apply them.")
                 }
+
+                #if DEBUG
+                Section {
+                    Toggle("Freeze location pushes", isOn: freezeBinding)
+                } header: {
+                    Text("Diagnostics")
+                } footer: {
+                    Text("Debug only. Stops sending location to the camera (real pushes and keep-alives) while still "
+                        + "receiving fixes — used to measure how long the camera keeps a fix before it shows "
+                        + "\"Location information cannot be obtained\" (test T1). Turn off to confirm the fix recovers "
+                        + "without a reconnect (T2).")
+                }
+                #endif
             }
             .navigationTitle("Settings")
         }
@@ -60,4 +73,10 @@ struct SettingsView: View {
     private var timeZoneBinding: Binding<Bool> {
         Binding(get: { coordinator.syncTimeZone }, set: { coordinator.setSyncTimeZone($0) })
     }
+
+    #if DEBUG
+    private var freezeBinding: Binding<Bool> {
+        Binding(get: { coordinator.pushesFrozen }, set: { coordinator.setPushesFrozen($0) })
+    }
+    #endif
 }
