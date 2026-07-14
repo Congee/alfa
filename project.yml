@@ -61,14 +61,41 @@ targets:
         NSLocationWhenInUseUsageDescription: "Alfa uses your location to geotag photos on your Sony camera."
         NSLocationAlwaysAndWhenInUseUsageDescription: "Alfa needs Always access to geotag photos while running in the background."
 
+  # On-device BLE integration tests. Hosted by the Alfa app so they inherit its Bluetooth entitlement, usage strings,
+  # and existing permission grant. Drives the real CameraCentral against the AlfaCameraSim mock (running on a Mac).
+  # See Tools/ble-integration/README.md. The reconnect test skips itself unless ALFA_RUN_BLE_IT=1 is set.
+  AlfaIntegrationTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "18.0"
+    sources:
+      - path: Tests/AlfaIntegrationTests
+    configFiles:
+      Debug: Config/Local.xcconfig
+      Release: Config/Local.xcconfig
+    dependencies:
+      - target: Alfa
+      - package: AlfaKit
+        product: SonyBLE
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: me.congee.alfa.IntegrationTests
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_STYLE: Automatic
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Alfa.app/Alfa"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+
 schemes:
   Alfa:
     build:
       targets:
         Alfa: all
+        AlfaIntegrationTests: [test]
     run:
       config: Debug
     test:
       config: Debug
+      targets:
+        - AlfaIntegrationTests
     archive:
       config: Release
