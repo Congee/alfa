@@ -125,6 +125,14 @@ every ~3 s while the feature reads inactive. Remote-service protocol errors retu
 Not required for Phase 1's core, but `CC05` power-state observation is useful for the "camera is on/off" signal that
 drives the Balanced battery policy.
 
+**`CC13` — implemented (beta, 🟡).** `SonyTimePacket` (`SonyProtocol/TimePacket.swift`) encodes this layout and the
+BLE layer writes it best-effort on connect when the "Time Correction" setting is on and the characteristic is present
+(clean no-op otherwise). **Unverified assumption:** the date/time fields are treated as **local wall-clock** and the
+offset fields as the **base** UTC offset (`total − dst`), with DST reported separately. If on-device testing shows the
+camera expects UTC-based fields, switch the derivation in `SonyTimePacket.init(date:timeZone:)` to a UTC calendar —
+an isolated change. (Time-zone sync itself does not depend on CC13: it rides the DD11 tz/dst block, gated by the
+"Time Area Correction" setting.)
+
 ## Pairing service `8000EE00` 🟡
 
 `EE01`: write `06 08 01 00 00 00` to finalize app-level pairing after OS bonding; also carries a power-off command.

@@ -180,6 +180,67 @@ public final class GeotagCoordinator {
         )
     }
 
+    public var bluetoothDescription: String {
+        switch bluetooth {
+        case .unknown: "Checking…"
+        case .notDetermined: "Not enabled"
+        case .unauthorized: "Denied — enable in Settings"
+        case .poweredOff: "Turn on Bluetooth"
+        case .unsupported: "Unavailable"
+        case .ready: "On"
+        }
+    }
+
+    public var locationAccessDescription: String {
+        switch locationAuthorization {
+        case .notDetermined: "Not asked"
+        case .denied: "Denied — enable in Settings"
+        case .whenInUse: "While Using"
+        case .always: "Always"
+        }
+    }
+
+    // MARK: - UI intent helpers (primitive so the app layer never names SonyBLE types)
+
+    /// Bluetooth is on and authorized.
+    public var isBluetoothReady: Bool { bluetooth == .ready }
+    /// The Bluetooth prompt hasn't been shown yet — `requestBluetooth()` will surface it.
+    public var canRequestBluetooth: Bool { bluetooth == .notDetermined || bluetooth == .unknown }
+
+    /// Location is granted at the "Always" level (background geotagging works).
+    public var locationIsAlways: Bool { locationAuthorization == .always }
+    /// The location prompt hasn't been shown yet — `requestLocationWhenInUse()` will surface it.
+    public var canRequestLocation: Bool { locationAuthorization == .notDetermined }
+    /// Location was denied/restricted — the user must fix it in Settings.
+    public var locationDenied: Bool { locationAuthorization == .denied }
+
+    /// A camera link is fully established.
+    public var isConnected: Bool { connection == .connected }
+    /// The engine is actively scanning/connecting.
+    public var isSearching: Bool { connection == .scanning || connection == .connecting }
+
+    // Settings, as primitives the UI can bind to without importing SonyBLE.
+    public var distanceMeters: Double { settings.distanceMeters }
+    public var intervalSeconds: TimeInterval { settings.intervalSeconds }
+    public var syncClock: Bool { settings.syncClock }
+    public var syncTimeZone: Bool { settings.syncTimeZone }
+
+    public func setDistanceMeters(_ meters: Double) {
+        var updated = settings; updated.distanceMeters = meters; updateSettings(updated)
+    }
+
+    public func setIntervalSeconds(_ seconds: TimeInterval) {
+        var updated = settings; updated.intervalSeconds = seconds; updateSettings(updated)
+    }
+
+    public func setSyncClock(_ on: Bool) {
+        var updated = settings; updated.syncClock = on; updateSettings(updated)
+    }
+
+    public func setSyncTimeZone(_ on: Bool) {
+        var updated = settings; updated.syncTimeZone = on; updateSettings(updated)
+    }
+
     // MARK: - Pipelines
 
     private func startPipelinesIfNeeded() {

@@ -14,9 +14,13 @@
 
 ```
 Alfa/
-├── App/                      # iOS app target (SwiftUI). Thin. No protocol logic.
+├── App/                      # iOS app target (SwiftUI). Thin. No protocol logic; names no SonyBLE types.
 │   ├── AlfaApp.swift
-│   ├── ContentView.swift
+│   ├── ContentView.swift     # tab shell (Home/Settings/Help) + first-run onboarding cover
+│   ├── HomeView.swift        # status + enable/sync/forget
+│   ├── OnboardingView.swift  # permissions + camera-prep + pairing flow
+│   ├── SettingsView.swift    # update distance/interval + time-sync toggles
+│   ├── HelpView.swift        # troubleshooting + compatibility + about
 │   └── Assets.xcassets
 └── AlfaKit/                  # Swift package — all reusable logic (also feeds future Watch/widget targets)
     ├── Sources/
@@ -25,12 +29,14 @@ Alfa/
     │   │   ├── LocationPacket.swift   # GPS+time encoder (95/91-byte), tz/dst
     │   │   ├── RemoteCommand.swift    # button press/release codes, FF02 status parsing
     │   │   ├── Advertisement.swift    # Sony manufacturer-data parser
-    │   │   └── CameraPowerState.swift # CC05 power/standby parser (conservative, host-tested)
+    │   │   ├── CameraPowerState.swift # CC05 power/standby parser (conservative, host-tested)
+    │   │   └── TimePacket.swift       # CC13 clock-sync packet (beta 🟡, host-tested)
     │   ├── SonyBLE/          # CoreBluetooth engine. Depends on SonyProtocol.
-    │   │   ├── CameraTypes.swift      # CameraConnectionState, CameraEvent, ConnectionPolicy, LocationFix (pure)
-    │   │   ├── GeotagPolicy.swift     # PURE Balanced-policy reducer (host-tested, no CoreBluetooth)
+    │   │   ├── CameraTypes.swift      # connection/BT-availability states, events, ConnectionPolicy, LocationFix
+    │   │   ├── GeotagPolicy.swift     # PURE Balanced-policy reducer (host-tested; distance + interval gates)
     │   │   ├── SonyCBUUID.swift       # CBUUID values derived from the pure SonyGATT strings
     │   │   ├── BondedCameraStore.swift# persists the bonded camera identity (RememberedCamera: id+name, UserDefaults)
+    │   │   ├── GeotagSettings.swift   # persisted user settings (distance/interval/time toggles, UserDefaults)
     │   │   ├── CameraLink.swift       # CoreBluetooth confinement — queue-confined @unchecked Sendable "hands"
     │   │   └── CameraCentral.swift    # actor "brain": policy state + link + republished event stream
     │   └── AlfaGeotag/       # CoreLocation + geotag orchestration. Depends on SonyBLE.
@@ -53,11 +59,12 @@ test loop.
 
 | Type | Isolation | Notes |
 |------|-----------|-------|
-| `SonyLocationPacket`, `SonyRemoteCommand`, `SonyAdvertisement`, `LocationFix` | `Sendable` value types | pure, immutable |
+| `SonyLocationPacket`, `SonyTimePacket`, `SonyRemoteCommand`, `SonyAdvertisement`, `LocationFix` | `Sendable` value types | pure, immutable |
 | `GeotagPolicyEngine` + `GeotagState` | pure `struct` reducer | the Balanced-policy decision logic; no I/O, host-unit-tested |
 | `CameraCentral` | `actor` (the "brain") | owns `GeotagState` + a `CameraLink`; consumes `Sendable` `LinkEvent`s in order, runs the reducer, issues link commands, republishes `AsyncStream<CameraEvent>`. Touches no `CB*` object. |
 | `CameraLink` | `final class`, `@unchecked Sendable` (the "hands") | owns `CBCentralManager`/`CBPeripheral`, confined to a private serial `DispatchQueue`; `CBCentralManagerDelegate`/`CBPeripheralDelegate` callbacks arrive on that queue. |
 | `BondedCameraStore` / `UserDefaultsBondedCameraStore` | `Sendable` protocol / `@unchecked Sendable` struct | persists the bonded camera identity (`RememberedCamera`: id + name); `UserDefaults` is documented thread-safe (the written justification for `@unchecked`). Injected into `CameraCentral` for host-testability. |
+| `GeotagSettingsStore` / `UserDefaultsGeotagSettingsStore` | `Sendable` protocol / `@unchecked Sendable` struct | persists `GeotagSettings` (distance / interval / time toggles) as JSON in `UserDefaults`; injected into `GeotagCoordinator` for host-testability. |
 | `LocationProvider` | `final class`, `@unchecked Sendable` | wraps `CLLocationManager` (main-confined); vends `Sendable` `LocationFix`/auth `AsyncStream`s. |
 | `GeotagCoordinator` | `@MainActor`, `@Observable` façade | pipes location samples into `CameraCentral`, mirrors its events into observable UI state. |
 | View models / UI | `@MainActor`, `@Observable` | subscribe to engine events; never touch CoreBluetooth directly. |
@@ -79,11 +86,17 @@ their queue.
 2. **Bond:** subscribe-to-notify pairing trick; handle ATT 5/15 retries.
 3. **Capability probe:** read the GATT tree; detect `DD30`/`DD31` presence for the fw-gated handshake.
 4. **Geotag session (Balanced policy):** while the camera is ON, keep the link and push location on movement / on
-   half-press; sync time on connect. When the camera goes to standby, tear down and back off (see
-   `05-battery-strategy.md`). Standby is detected **proactively** from the `CC05` power-state notification, falling back
-   to the CoreBluetooth disconnect when `CC05` is absent — both feed the pure reducer's `cameraPoweredOff`/`disconnected`
-   inputs, which never auto-reconnect.
+   half-press; sync time on connect. Pushes clear **two** gates — moved ≥ distance **and** (if set) waited ≥ interval
+   (`GeotagSettings`, user-tunable). The DD11 tz/dst block is gated by the "Time Area Correction" setting; a
+   best-effort `CC13` clock write (beta 🟡) fires on connect when "Time Correction" is on and the characteristic
+   exists. When the camera goes to standby, tear down and back off (see `05-battery-strategy.md`). Standby is detected
+   **proactively** from the `CC05` power-state notification, falling back to the CoreBluetooth disconnect when `CC05`
+   is absent — both feed the pure reducer's `cameraPoweredOff`/`disconnected` inputs, which never auto-reconnect.
 5. **Background:** `bluetooth-central` + Location "Always"; opt into CoreBluetooth state restoration deliberately.
+6. **Permissions / onboarding:** a first-run flow requests Bluetooth, then Location "While Using", walks the camera
+   prep checklist, pairs, and finally escalates to Location "Always" (per Apple's/Geotag Alpha's two-step guidance).
+   `GeotagCoordinator` exposes fine-grained `BluetoothAvailability`/`LocationAuthorization` as primitive helpers so the
+   SwiftUI layer branches on state without naming any `SonyBLE` type.
 
 ## Error handling
 

@@ -34,10 +34,16 @@ The core of the project. Deliver GPS + time sync **and** the "good BLE citizen" 
 - [~] Background operation: `bluetooth-central` + Location "Always" background modes wired; `CBCentralManager` restore
       identifier + `willRestoreState` handled; bonded UUID persisted/retrieved. *TODO: full background-relaunch /
       state-restoration flow (re-drive the policy from `willRestoreState`).*
-- [~] SwiftUI UI: status (connection, connected/remembered camera indicator, auth, fixes pushed, last fix, errors),
-      enable/disable, "Sync now", "Forget camera" (confirmation dialog). *TODO: multi-camera list, pairing flow,
-      permissions onboarding, camera battery if reported.*
-- [ ] On-device validation on A7R V fw 4.0, including the standby-drain success criterion.
+- [x] SwiftUI UI: tab shell (Home / Settings / Help); pairing + permissions onboarding flow (Bluetooth →
+      Location When-in-use→Always → camera-prep checklist → pair → done); status (connection, camera indicator,
+      Bluetooth + location access, fixes pushed, last fix, errors); enable/disable, "Sync now", "Forget camera"
+      (confirmation dialog). *TODO: multi-camera list, camera battery if reported.*
+- [x] Settings + time sync: customisable update distance + interval (persisted, `GeotagSettings`); Time Correction
+      (CC13 clock write, beta 🟡) + Time Area Correction (tz/dst block) toggles; in-app Help/Troubleshooting +
+      compatibility. *(feature parity with Geotag Alpha's Phase-1 geotag surface; multi-camera + update-on-focus
+      remain deferred — see D3/OQ4 and Phase 2.)*
+- [ ] On-device validation on A7R V fw 4.0, including the standby-drain success criterion **and** verifying the
+      CC13 clock/tz assumption (`SonyTimePacket` — flip to UTC-based fields if wrong).
 
 ## Phase 2 — Remote control (foreground)
 
