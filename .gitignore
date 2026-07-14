@@ -26,6 +26,9 @@ Package.resolved
 *.p12
 *.cer
 
+# Local signing config (personal Team ID) — keep the .example template only
+Config/Local.xcconfig
+
 # Firmware / reverse-engineering scratch (never commit Sony firmware blobs)
 *.DAT
 firmware/

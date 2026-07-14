@@ -1,0 +1,16 @@
+// Template for local signing configuration.
+//
+// XcodeGen wires this file into the Alfa target (see project.yml -> configFiles),
+// so signing settings survive project regeneration and never enter the repo.
+//
+// Setup:
+//   1. cp Config/Local.xcconfig.example Config/Local.xcconfig
+//   2. Set DEVELOPMENT_TEAM below to your Apple Developer Team ID.
+//      Find it with:
+//        security find-certificate -c "Apple Development: <your-apple-id>" -p \
+//          | openssl x509 -noout -subject
+//      The Team ID is the OU= field. A free personal team is sufficient for
+//      personal sideloading (7-day provisioning, no paid membership required).
+//   3. Regenerate the project: nix run nixpkgs#xcodegen
+
+DEVELOPMENT_TEAM =

@@ -1,7 +1,7 @@
 name: Alfa
 
 options:
-  bundleIdPrefix: me.connectify
+  bundleIdPrefix: me.congee
   deploymentTarget:
     iOS: "18.0"
   createIntermediateGroups: true
@@ -31,9 +31,14 @@ targets:
     dependencies:
       - package: AlfaKit
         product: AlfaGeotag
+    # Local signing config (DEVELOPMENT_TEAM) — see Config/Local.xcconfig.example.
+    # The real Config/Local.xcconfig is gitignored so personal team IDs stay out of the repo.
+    configFiles:
+      Debug: Config/Local.xcconfig
+      Release: Config/Local.xcconfig
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: me.connectify.alfa
+        PRODUCT_BUNDLE_IDENTIFIER: me.congee.alfa
         PRODUCT_NAME: Alfa
         GENERATE_INFOPLIST_FILE: NO
         TARGETED_DEVICE_FAMILY: "1"        # iPhone only (decision D3)
