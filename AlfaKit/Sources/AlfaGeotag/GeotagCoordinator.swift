@@ -64,6 +64,11 @@ public final class GeotagCoordinator {
         Task { await central.requestSync() }
     }
 
+    /// Forgets the remembered camera; the next enable/sync scans for a camera afresh instead of retrieving it.
+    public func forgetCamera() {
+        Task { await central.forgetCamera() }
+    }
+
     // MARK: - UI display helpers (keep the app layer free of SonyBLE types)
 
     public var connectionDescription: String {

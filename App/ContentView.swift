@@ -35,6 +35,9 @@ struct ContentView: View {
                         coordinator.syncNow()
                     }
                     .disabled(!coordinator.isEnabled)
+                    Button("Forget camera", role: .destructive) {
+                        coordinator.forgetCamera()
+                    }
                 } footer: {
                     Text("“Sync now” is the deliberate, low-frequency trigger to reconnect a standby camera — Alfa never "
                         + "holds the link open in the background, which is what drains the camera battery.")

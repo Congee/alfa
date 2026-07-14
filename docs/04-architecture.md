@@ -24,10 +24,13 @@ Alfa/
     │   │   ├── GATT.swift             # service/characteristic UUID strings, company ID
     │   │   ├── LocationPacket.swift   # GPS+time encoder (95/91-byte), tz/dst
     │   │   ├── RemoteCommand.swift    # button press/release codes, FF02 status parsing
-    │   │   └── Advertisement.swift    # Sony manufacturer-data parser
+    │   │   ├── Advertisement.swift    # Sony manufacturer-data parser
+    │   │   └── CameraPowerState.swift # CC05 power/standby parser (conservative, host-tested)
     │   ├── SonyBLE/          # CoreBluetooth engine. Depends on SonyProtocol.
     │   │   ├── CameraTypes.swift      # CameraConnectionState, CameraEvent, ConnectionPolicy, LocationFix (pure)
     │   │   ├── GeotagPolicy.swift     # PURE Balanced-policy reducer (host-tested, no CoreBluetooth)
+    │   │   ├── SonyCBUUID.swift       # CBUUID values derived from the pure SonyGATT strings
+    │   │   ├── BondedCameraStore.swift# persists the bonded peripheral UUID across launches (UserDefaults)
     │   │   ├── CameraLink.swift       # CoreBluetooth confinement — queue-confined @unchecked Sendable "hands"
     │   │   └── CameraCentral.swift    # actor "brain": policy state + link + republished event stream
     │   └── AlfaGeotag/       # CoreLocation + geotag orchestration. Depends on SonyBLE.
@@ -54,6 +57,7 @@ test loop.
 | `GeotagPolicyEngine` + `GeotagState` | pure `struct` reducer | the Balanced-policy decision logic; no I/O, host-unit-tested |
 | `CameraCentral` | `actor` (the "brain") | owns `GeotagState` + a `CameraLink`; consumes `Sendable` `LinkEvent`s in order, runs the reducer, issues link commands, republishes `AsyncStream<CameraEvent>`. Touches no `CB*` object. |
 | `CameraLink` | `final class`, `@unchecked Sendable` (the "hands") | owns `CBCentralManager`/`CBPeripheral`, confined to a private serial `DispatchQueue`; `CBCentralManagerDelegate`/`CBPeripheralDelegate` callbacks arrive on that queue. |
+| `BondedCameraStore` / `UserDefaultsBondedCameraStore` | `Sendable` protocol / `@unchecked Sendable` struct | persists the bonded peripheral UUID; `UserDefaults` is documented thread-safe (the written justification for `@unchecked`). Injected into `CameraCentral` for host-testability. |
 | `LocationProvider` | `final class`, `@unchecked Sendable` | wraps `CLLocationManager` (main-confined); vends `Sendable` `LocationFix`/auth `AsyncStream`s. |
 | `GeotagCoordinator` | `@MainActor`, `@Observable` façade | pipes location samples into `CameraCentral`, mirrors its events into observable UI state. |
 | View models / UI | `@MainActor`, `@Observable` | subscribe to engine events; never touch CoreBluetooth directly. |
@@ -69,12 +73,15 @@ their queue.
 ## Key runtime flows (Phase 1)
 
 1. **Discover:** scan filtered by company ID `0x012D` (and/or the location service UUID once bonded). Prefer
-   `retrieveConnectedPeripherals`/`retrievePeripherals(withIdentifiers:)` over rescanning.
+   `retrieveConnectedPeripherals`/`retrievePeripherals(withIdentifiers:)` over rescanning; the last bonded peripheral's
+   UUID is persisted (`BondedCameraStore`) and loaded on launch so a remembered camera is retrieved without a scan.
 2. **Bond:** subscribe-to-notify pairing trick; handle ATT 5/15 retries.
 3. **Capability probe:** read the GATT tree; detect `DD30`/`DD31` presence for the fw-gated handshake.
 4. **Geotag session (Balanced policy):** while the camera is ON, keep the link and push location on movement / on
    half-press; sync time on connect. When the camera goes to standby, tear down and back off (see
-   `05-battery-strategy.md`).
+   `05-battery-strategy.md`). Standby is detected **proactively** from the `CC05` power-state notification, falling back
+   to the CoreBluetooth disconnect when `CC05` is absent — both feed the pure reducer's `cameraPoweredOff`/`disconnected`
+   inputs, which never auto-reconnect.
 5. **Background:** `bluetooth-central` + Location "Always"; opt into CoreBluetooth state restoration deliberately.
 
 ## Error handling

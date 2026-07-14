@@ -6,8 +6,9 @@ import SonyProtocol
 enum LinkEvent: Sendable, Equatable {
     case bluetoothState(poweredOn: Bool)
     case discovered(id: UUID, name: String?, rssi: Int, manufacturerData: [UInt8]?)
-    /// Services + characteristics discovered and the fw-gated handshake completed.
-    case ready
+    /// Services + characteristics discovered and the fw-gated handshake completed. Carries the bonded peripheral's
+    /// identifier so the brain can remember it and retrieve it directly on a later launch.
+    case ready(id: UUID)
     case connectFailed
     case disconnected
     case wroteLocation
@@ -38,10 +39,14 @@ final class CameraLink: NSObject, @unchecked Sendable {
     private var enableChar: CBCharacteristic? // DD31
     private var notifyChar: CBCharacteristic? // DD01
 
+    // Camera Control service characteristic (nil until discovered / absent on some bodies).
+    private var powerStateChar: CBCharacteristic? // CC05
+
     private var knownIdentifier: UUID?
     private var handshakeComplete = false
     private var scanTimeout: DispatchWorkItem?
     private var bondRetries = 0
+    private var powerNotifyRetries = 0
 
     /// How long a foreground scan may run before we give up quietly (never hold a scan open indefinitely).
     private static let scanTimeoutSeconds = 12.0
@@ -159,8 +164,10 @@ final class CameraLink: NSObject, @unchecked Sendable {
         unlockChar = nil
         enableChar = nil
         notifyChar = nil
+        powerStateChar = nil
         handshakeComplete = false
         bondRetries = 0
+        powerNotifyRetries = 0
     }
 
     private func teardown() {
@@ -175,7 +182,7 @@ final class CameraLink: NSObject, @unchecked Sendable {
         if let unlockChar { peripheral.writeValue(Data([0x01]), for: unlockChar, type: .withResponse) }
         if let enableChar { peripheral.writeValue(Data([0x01]), for: enableChar, type: .withResponse) }
         handshakeComplete = true
-        onEvent(.ready)
+        onEvent(.ready(id: peripheral.identifier))
     }
 }
 
@@ -216,7 +223,8 @@ extension CameraLink: CBCentralManagerDelegate {
     }
 
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
-        peripheral.discoverServices([SonyCBUUID.locationService])
+        // Location service drives geotagging; the Camera Control service (CC05) is a best-effort standby signal.
+        peripheral.discoverServices([SonyCBUUID.locationService, SonyCBUUID.cameraControlService])
     }
 
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
@@ -243,17 +251,24 @@ extension CameraLink: CBPeripheralDelegate {
             onEvent(.failure("service discovery failed"))
             return
         }
-        for service in services where service.uuid == SonyCBUUID.locationService {
-            peripheral.discoverCharacteristics(
-                [
-                    SonyCBUUID.locationWrite,
-                    SonyCBUUID.locationUnlock,
-                    SonyCBUUID.locationEnable,
-                    SonyCBUUID.locationNotify,
-                    SonyCBUUID.locationConfig,
-                ],
-                for: service
-            )
+        for service in services {
+            switch service.uuid {
+            case SonyCBUUID.locationService:
+                peripheral.discoverCharacteristics(
+                    [
+                        SonyCBUUID.locationWrite,
+                        SonyCBUUID.locationUnlock,
+                        SonyCBUUID.locationEnable,
+                        SonyCBUUID.locationNotify,
+                        SonyCBUUID.locationConfig,
+                    ],
+                    for: service
+                )
+            case SonyCBUUID.cameraControlService:
+                peripheral.discoverCharacteristics([SonyCBUUID.cameraPowerState], for: service)
+            default:
+                break
+            }
         }
     }
 
@@ -262,18 +277,31 @@ extension CameraLink: CBPeripheralDelegate {
             onEvent(.failure("characteristic discovery failed"))
             return
         }
-        for characteristic in characteristics {
-            switch characteristic.uuid {
-            case SonyCBUUID.locationWrite: writeChar = characteristic
-            case SonyCBUUID.locationUnlock: unlockChar = characteristic
-            case SonyCBUUID.locationEnable: enableChar = characteristic
-            case SonyCBUUID.locationNotify: notifyChar = characteristic
-            default: break
+        switch service.uuid {
+        case SonyCBUUID.locationService:
+            for characteristic in characteristics {
+                switch characteristic.uuid {
+                case SonyCBUUID.locationWrite: writeChar = characteristic
+                case SonyCBUUID.locationUnlock: unlockChar = characteristic
+                case SonyCBUUID.locationEnable: enableChar = characteristic
+                case SonyCBUUID.locationNotify: notifyChar = characteristic
+                default: break
+                }
             }
+            // Bonding trick (docs/03): subscribing to a notify characteristic triggers the OS pairing dialog.
+            if let notifyChar { peripheral.setNotifyValue(true, for: notifyChar) }
+            runHandshake()
+        case SonyCBUUID.cameraControlService:
+            for characteristic in characteristics where characteristic.uuid == SonyCBUUID.cameraPowerState {
+                powerStateChar = characteristic
+                // Best-effort standby signal: subscribe and read the initial value. May need bonding first (retried
+                // in didUpdateNotificationStateFor); absence of this characteristic is fine — geotagging still works.
+                peripheral.setNotifyValue(true, for: characteristic)
+                peripheral.readValue(for: characteristic)
+            }
+        default:
+            break
         }
-        // Bonding trick (docs/03): subscribing to a notify characteristic triggers the OS pairing dialog.
-        if let notifyChar { peripheral.setNotifyValue(true, for: notifyChar) }
-        runHandshake()
     }
 
     func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
@@ -295,11 +323,26 @@ extension CameraLink: CBPeripheralDelegate {
         error: Error?
     ) {
         // An ATT auth/encryption error here means bonding is required; iOS shows the dialog and re-invokes once bonded.
-        // A few spaced retries cover transient authentication errors (docs/03 pairing trick).
-        guard error != nil, bondRetries < Self.maxBondRetries else { return }
-        bondRetries += 1
-        queue.asyncAfter(deadline: .now() + 3) { [self] in
-            if let notifyChar { self.peripheral?.setNotifyValue(true, for: notifyChar) }
+        // A few spaced retries cover transient authentication errors (docs/03 pairing trick). Retries are
+        // per-characteristic: DD01 is the bonding trigger, CC05 is the best-effort standby signal.
+        switch characteristic.uuid {
+        case SonyCBUUID.locationNotify:
+            guard error != nil, bondRetries < Self.maxBondRetries else { return }
+            bondRetries += 1
+            queue.asyncAfter(deadline: .now() + 3) { [self] in
+                if let notifyChar { self.peripheral?.setNotifyValue(true, for: notifyChar) }
+            }
+        case SonyCBUUID.cameraPowerState:
+            guard error != nil, powerNotifyRetries < Self.maxBondRetries else { return }
+            powerNotifyRetries += 1
+            queue.asyncAfter(deadline: .now() + 3) { [self] in
+                if let powerStateChar {
+                    self.peripheral?.setNotifyValue(true, for: powerStateChar)
+                    self.peripheral?.readValue(for: powerStateChar)
+                }
+            }
+        default:
+            break
         }
     }
 }

@@ -15,6 +15,7 @@ public actor CameraCentral {
     public nonisolated let events: AsyncStream<CameraEvent>
 
     private let engine: GeotagPolicyEngine
+    private let bondedStore: BondedCameraStore
     private var state = GeotagState()
     private var link: CameraLink?
     private var pushCount = 0
@@ -25,8 +26,12 @@ public actor CameraCentral {
     private let linkEventContinuation: AsyncStream<LinkEvent>.Continuation
     private var consumeTask: Task<Void, Never>?
 
-    public init(policy: ConnectionPolicy = .balanced) {
+    public init(
+        policy: ConnectionPolicy = .balanced,
+        bondedStore: BondedCameraStore = UserDefaultsBondedCameraStore()
+    ) {
         self.policy = policy
+        self.bondedStore = bondedStore
         engine = GeotagPolicyEngine(config: policy)
         (events, eventContinuation) = AsyncStream.makeStream(of: CameraEvent.self)
         (linkEvents, linkEventContinuation) = AsyncStream.makeStream(of: LinkEvent.self)
@@ -40,7 +45,7 @@ public actor CameraCentral {
         let continuation = linkEventContinuation
         let newLink = CameraLink(
             restoreIdentifier: "me.congee.alfa.central",
-            knownIdentifier: nil, // TODO(Phase 1): persist the bonded peripheral's UUID across launches
+            knownIdentifier: bondedStore.load(), // re-adopt the remembered camera without a fresh scan
             onEvent: { continuation.yield($0) }
         )
         link = newLink
@@ -76,6 +81,11 @@ public actor CameraCentral {
         apply(engine.reduce(&state, .syncRequested))
     }
 
+    /// Forgets the remembered camera so the next discovery scans afresh (e.g. a "Forget camera" action).
+    public func forgetCamera() {
+        bondedStore.clear()
+    }
+
     // MARK: - Link event handling
 
     private func handle(_ event: LinkEvent) {
@@ -87,7 +97,9 @@ public actor CameraCentral {
             let model = manufacturerData.flatMap { SonyAdvertisement(manufacturerData: $0)?.modelCode } ?? name
             eventContinuation.yield(.discovered(peripheralID: id, modelCode: model, rssi: rssi))
 
-        case .ready:
+        case let .ready(id):
+            // Remember this bonded, location-capable camera so a later launch retrieves it directly, no scan needed.
+            bondedStore.save(id)
             apply(engine.reduce(&state, .connected))
 
         case .connectFailed:
@@ -100,8 +112,13 @@ public actor CameraCentral {
             pushCount += 1
             eventContinuation.yield(.locationPushed(count: pushCount))
 
-        case .notify:
-            break // Phase 1: DD01 location-enabled flag observed but not yet acted upon.
+        case let .notify(characteristic, value):
+            // CC05 is the camera's power/standby signal: a confirmed power-off proactively tears down the link and
+            // backs off. (The DD01 location-enabled flag is still observed-only in Phase 1.)
+            if characteristic == SonyGATT.Characteristic.cameraPowerState,
+               CameraPowerState(cc05: value) == .off {
+                apply(engine.reduce(&state, .cameraPoweredOff))
+            }
 
         case let .failure(message):
             eventContinuation.yield(.failure(message))
