@@ -24,6 +24,8 @@ public enum CameraConnectionState: Sendable, Equatable {
 public enum CameraEvent: Sendable, Equatable {
     case stateChanged(CameraConnectionState)
     case discovered(peripheralID: UUID, modelCode: String?, rssi: Int)
+    /// The connected camera's identity (its advertised name), for the UI's camera indicator.
+    case cameraIdentified(peripheralID: UUID, name: String?)
     case locationPushed(count: Int)
     case failure(String)
 }

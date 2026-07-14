@@ -24,17 +24,19 @@ The core of the project. Deliver GPS + time sync **and** the "good BLE citizen" 
 - [x] `AlfaGeotag.GeotagCoordinator` + `LocationProvider`: CoreLocation updates (distance-filtered); "Balanced" policy
       state machine (connected-while-on, backed-off-in-standby) driven by the pure reducer.
 - [x] Time + time-zone sync on connect (rides the location packet's UTC + tz/dst block).
-- [x] Persist the bonded peripheral UUID across launches (`BondedCameraStore`, `UserDefaults`-backed): saved on a
-      successful bond (`ready`), loaded at `start()` so discovery uses `retrievePeripherals(withIdentifiers:)` before
-      scanning; a "Forget camera" action clears it.
+- [x] Persist the bonded camera identity (id + name) across launches (`BondedCameraStore`/`RememberedCamera`,
+      `UserDefaults`-backed): saved on a successful bond (`ready`), loaded at `start()` so discovery uses
+      `retrievePeripherals(withIdentifiers:)` before scanning, and shown in the UI on a cold launch (as Alpha Remote
+      does). "Forget camera" disconnects + clears it.
 - [x] Observe `CC05` power-state (Camera Control service `8000CC00`) to feed the policy's `cameraPoweredOff` input:
       conservative pure parser (`CameraPowerState`, host-tested), subscribed + read on connect, best-effort (falls back
       to disconnect-inferred standby when the characteristic is absent).
 - [~] Background operation: `bluetooth-central` + Location "Always" background modes wired; `CBCentralManager` restore
       identifier + `willRestoreState` handled; bonded UUID persisted/retrieved. *TODO: full background-relaunch /
       state-restoration flow (re-drive the policy from `willRestoreState`).*
-- [~] SwiftUI UI: status (connection, auth, fixes pushed, last fix, errors), enable/disable, "Sync now", "Forget
-      camera". *TODO: camera list / multi-camera, pairing flow, permissions onboarding, camera battery if reported.*
+- [~] SwiftUI UI: status (connection, connected/remembered camera indicator, auth, fixes pushed, last fix, errors),
+      enable/disable, "Sync now", "Forget camera" (confirmation dialog). *TODO: multi-camera list, pairing flow,
+      permissions onboarding, camera battery if reported.*
 - [ ] On-device validation on A7R V fw 4.0, including the standby-drain success criterion.
 
 ## Phase 2 — Remote control (foreground)

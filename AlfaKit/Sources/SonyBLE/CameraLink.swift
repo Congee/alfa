@@ -7,8 +7,8 @@ enum LinkEvent: Sendable, Equatable {
     case bluetoothState(poweredOn: Bool)
     case discovered(id: UUID, name: String?, rssi: Int, manufacturerData: [UInt8]?)
     /// Services + characteristics discovered and the fw-gated handshake completed. Carries the bonded peripheral's
-    /// identifier so the brain can remember it and retrieve it directly on a later launch.
-    case ready(id: UUID)
+    /// identifier (remembered for direct retrieval on a later launch) and its advertised name (for the UI indicator).
+    case ready(id: UUID, name: String?)
     case connectFailed
     case disconnected
     case wroteLocation
@@ -105,13 +105,15 @@ final class CameraLink: NSObject, @unchecked Sendable {
     }
 
     func disconnect() {
+        queue.async { [self] in gracefulDisconnect() }
+    }
+
+    /// Forgets the current camera: clears the remembered identifier and gracefully drops the live link. The resulting
+    /// `disconnected` event drives the policy to back off, giving the UI immediate, visible feedback.
+    func forget() {
         queue.async { [self] in
-            stopScan()
-            guard let peripheral else { return }
-            // Best-effort graceful close of the fw-gated endpoint before dropping the link.
-            if let enableChar { peripheral.writeValue(Data([0x00]), for: enableChar, type: .withResponse) }
-            if let unlockChar { peripheral.writeValue(Data([0x00]), for: unlockChar, type: .withResponse) }
-            manager?.cancelPeripheralConnection(peripheral)
+            knownIdentifier = nil
+            gracefulDisconnect()
         }
     }
 
@@ -170,6 +172,15 @@ final class CameraLink: NSObject, @unchecked Sendable {
         powerNotifyRetries = 0
     }
 
+    private func gracefulDisconnect() {
+        stopScan()
+        guard let peripheral else { return }
+        // Best-effort graceful close of the fw-gated endpoint before dropping the link.
+        if let enableChar { peripheral.writeValue(Data([0x00]), for: enableChar, type: .withResponse) }
+        if let unlockChar { peripheral.writeValue(Data([0x00]), for: unlockChar, type: .withResponse) }
+        manager?.cancelPeripheralConnection(peripheral)
+    }
+
     private func teardown() {
         stopScan()
         if let peripheral { manager?.cancelPeripheralConnection(peripheral) }
@@ -182,7 +193,7 @@ final class CameraLink: NSObject, @unchecked Sendable {
         if let unlockChar { peripheral.writeValue(Data([0x01]), for: unlockChar, type: .withResponse) }
         if let enableChar { peripheral.writeValue(Data([0x01]), for: enableChar, type: .withResponse) }
         handshakeComplete = true
-        onEvent(.ready(id: peripheral.identifier))
+        onEvent(.ready(id: peripheral.identifier, name: peripheral.name))
     }
 }
 

@@ -45,7 +45,7 @@ public actor CameraCentral {
         let continuation = linkEventContinuation
         let newLink = CameraLink(
             restoreIdentifier: "me.congee.alfa.central",
-            knownIdentifier: bondedStore.load(), // re-adopt the remembered camera without a fresh scan
+            knownIdentifier: bondedStore.load()?.id, // re-adopt the remembered camera without a fresh scan
             onEvent: { continuation.yield($0) }
         )
         link = newLink
@@ -81,9 +81,16 @@ public actor CameraCentral {
         apply(engine.reduce(&state, .syncRequested))
     }
 
-    /// Forgets the remembered camera so the next discovery scans afresh (e.g. a "Forget camera" action).
+    /// Forgets the remembered camera: clears persistence and gracefully drops any live link so the engine returns to a
+    /// clean state (the resulting disconnect backs the policy off). The next Sync/enable scans afresh.
     public func forgetCamera() {
         bondedStore.clear()
+        link?.forget()
+    }
+
+    /// The remembered camera (id + name), if any — lets the UI show it while disconnected, as Alpha Remote does.
+    public func rememberedCamera() -> RememberedCamera? {
+        bondedStore.load()
     }
 
     // MARK: - Link event handling
@@ -97,9 +104,10 @@ public actor CameraCentral {
             let model = manufacturerData.flatMap { SonyAdvertisement(manufacturerData: $0)?.modelCode } ?? name
             eventContinuation.yield(.discovered(peripheralID: id, modelCode: model, rssi: rssi))
 
-        case let .ready(id):
+        case let .ready(id, name):
             // Remember this bonded, location-capable camera so a later launch retrieves it directly, no scan needed.
-            bondedStore.save(id)
+            bondedStore.save(RememberedCamera(id: id, name: name))
+            eventContinuation.yield(.cameraIdentified(peripheralID: id, name: name))
             apply(engine.reduce(&state, .connected))
 
         case .connectFailed:

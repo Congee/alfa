@@ -13,6 +13,8 @@ import SonyBLE
 public final class GeotagCoordinator {
     public private(set) var isEnabled = false
     public private(set) var connection: CameraConnectionState = .idle
+    /// Advertised name of the camera Alfa is working with. Persists across standby; cleared on disable/forget.
+    public private(set) var cameraName: String?
     public private(set) var lastFix: LocationFix?
     public private(set) var pushCount = 0
     public private(set) var lastError: String?
@@ -55,6 +57,7 @@ public final class GeotagCoordinator {
     public func disable() {
         guard isEnabled else { return }
         isEnabled = false
+        cameraName = nil
         location.stop()
         Task { await central.setEnabled(false) }
     }
@@ -64,9 +67,20 @@ public final class GeotagCoordinator {
         Task { await central.requestSync() }
     }
 
-    /// Forgets the remembered camera; the next enable/sync scans for a camera afresh instead of retrieving it.
+    /// Forgets the current camera: clears its identity immediately (visible feedback) and tells the engine to
+    /// disconnect and stop retrieving it. The next enable/sync scans for a camera afresh.
     public func forgetCamera() {
+        cameraName = nil
         Task { await central.forgetCamera() }
+    }
+
+    /// Loads the remembered camera (if any) so the UI shows it on a cold launch — before the BLE engine is started —
+    /// the way Alpha Remote lists a known camera you can see and forget while it's offline.
+    public func loadRememberedCameraIfNeeded() async {
+        guard cameraName == nil else { return }
+        if let remembered = await central.rememberedCamera() {
+            cameraName = remembered.name ?? "Sony camera"
+        }
     }
 
     // MARK: - UI display helpers (keep the app layer free of SonyBLE types)
@@ -128,6 +142,7 @@ public final class GeotagCoordinator {
         switch event {
         case let .stateChanged(state): connection = state
         case .discovered: break
+        case let .cameraIdentified(_, name): cameraName = name ?? "Sony camera"
         case let .locationPushed(count): pushCount = count
         case let .failure(message): lastError = message
         }

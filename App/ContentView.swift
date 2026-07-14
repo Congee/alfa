@@ -3,6 +3,7 @@ import SwiftUI
 
 struct ContentView: View {
     @State private var coordinator = GeotagCoordinator()
+    @State private var showForgetConfirm = false
 
     var body: some View {
         NavigationStack {
@@ -10,6 +11,9 @@ struct ContentView: View {
                 Section("Status") {
                     LabeledContent("Geotagging", value: coordinator.isEnabled ? "On" : "Off")
                     LabeledContent("Connection", value: coordinator.connectionDescription)
+                    if let camera = coordinator.cameraName {
+                        LabeledContent("Camera", value: camera)
+                    }
                     LabeledContent("Location access", value: coordinator.locationAuthorized ? "Granted" : "Not granted")
                     LabeledContent("Fixes pushed", value: "\(coordinator.pushCount)")
                     if let fix = coordinator.lastFixDescription {
@@ -36,7 +40,21 @@ struct ContentView: View {
                     }
                     .disabled(!coordinator.isEnabled)
                     Button("Forget camera", role: .destructive) {
-                        coordinator.forgetCamera()
+                        showForgetConfirm = true
+                    }
+                    .disabled(coordinator.cameraName == nil)
+                    .confirmationDialog(
+                        "Forget this camera?",
+                        isPresented: $showForgetConfirm,
+                        titleVisibility: .visible
+                    ) {
+                        Button("Forget camera", role: .destructive) {
+                            coordinator.forgetCamera()
+                        }
+                        Button("Cancel", role: .cancel) {}
+                    } message: {
+                        Text("Alfa disconnects and stops sending location to this camera until you tap Enable or "
+                            + "“Sync now” to reconnect.")
                     }
                 } footer: {
                     Text("“Sync now” is the deliberate, low-frequency trigger to reconnect a standby camera — Alfa never "
@@ -51,6 +69,7 @@ struct ContentView: View {
                 }
             }
             .navigationTitle("Alfa")
+            .task { await coordinator.loadRememberedCameraIfNeeded() }
         }
     }
 }

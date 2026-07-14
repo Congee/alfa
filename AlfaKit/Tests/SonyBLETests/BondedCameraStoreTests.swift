@@ -9,7 +9,7 @@ struct BondedCameraStoreTests {
     private func freshStore(suite: String) -> UserDefaultsBondedCameraStore {
         let defaults = UserDefaults(suiteName: suite)!
         defaults.removePersistentDomain(forName: suite)
-        return UserDefaultsBondedCameraStore(defaults: defaults, key: "bondedCameraID")
+        return UserDefaultsBondedCameraStore(defaults: defaults, key: "bondedCamera")
     }
 
     @Test("Starts empty")
@@ -17,18 +17,26 @@ struct BondedCameraStoreTests {
         #expect(freshStore(suite: "alfa.test.bond.empty").load() == nil)
     }
 
-    @Test("Round-trips a saved identifier")
+    @Test("Round-trips a saved camera (id and name)")
     func roundTrips() {
         let store = freshStore(suite: "alfa.test.bond.roundtrip")
-        let id = UUID()
-        store.save(id)
-        #expect(store.load() == id)
+        let camera = RememberedCamera(id: UUID(), name: "ILCE-7RM5")
+        store.save(camera)
+        #expect(store.load() == camera)
     }
 
-    @Test("Clear forgets the identifier")
+    @Test("Round-trips a camera with no advertised name")
+    func roundTripsNoName() {
+        let store = freshStore(suite: "alfa.test.bond.noname")
+        let camera = RememberedCamera(id: UUID(), name: nil)
+        store.save(camera)
+        #expect(store.load() == camera)
+    }
+
+    @Test("Clear forgets the camera")
     func clears() {
         let store = freshStore(suite: "alfa.test.bond.clear")
-        store.save(UUID())
+        store.save(RememberedCamera(id: UUID(), name: "α7R V"))
         store.clear()
         #expect(store.load() == nil)
     }
@@ -38,8 +46,8 @@ struct BondedCameraStoreTests {
         let suite = "alfa.test.bond.corrupt"
         let defaults = UserDefaults(suiteName: suite)!
         defaults.removePersistentDomain(forName: suite)
-        defaults.set("not-a-uuid", forKey: "bondedCameraID")
-        let store = UserDefaultsBondedCameraStore(defaults: defaults, key: "bondedCameraID")
+        defaults.set(Data("not-json".utf8), forKey: "bondedCamera")
+        let store = UserDefaultsBondedCameraStore(defaults: defaults, key: "bondedCamera")
         #expect(store.load() == nil)
     }
 }
