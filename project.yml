@@ -1,0 +1,69 @@
+name: Alfa
+
+options:
+  bundleIdPrefix: me.connectify
+  deploymentTarget:
+    iOS: "18.0"
+  createIntermediateGroups: true
+  groupSortPosition: top
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+    GCC_TREAT_WARNINGS_AS_ERRORS: YES
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+
+packages:
+  AlfaKit:
+    path: AlfaKit
+
+targets:
+  Alfa:
+    type: application
+    platform: iOS
+    deploymentTarget: "18.0"
+    sources:
+      - path: App
+    dependencies:
+      - package: AlfaKit
+        product: AlfaGeotag
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: me.connectify.alfa
+        PRODUCT_NAME: Alfa
+        GENERATE_INFOPLIST_FILE: NO
+        TARGETED_DEVICE_FAMILY: "1"        # iPhone only (decision D3)
+        CODE_SIGN_STYLE: Automatic
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: Alfa
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UIBackgroundModes:
+          - bluetooth-central
+          - location
+        NSBluetoothAlwaysUsageDescription: "Alfa connects to your Sony camera over Bluetooth to sync GPS location and time."
+        NSLocationWhenInUseUsageDescription: "Alfa uses your location to geotag photos on your Sony camera."
+        NSLocationAlwaysAndWhenInUseUsageDescription: "Alfa needs Always access to geotag photos while running in the background."
+
+schemes:
+  Alfa:
+    build:
+      targets:
+        Alfa: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+    archive:
+      config: Release

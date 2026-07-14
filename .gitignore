@@ -1,0 +1,32 @@
+# Xcode / macOS
+.DS_Store
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+xcuserdata/
+DerivedData/
+build/
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# XcodeGen output — generated from project.yml, do NOT commit
+Alfa.xcodeproj/
+App/Info.plist
+
+# Swift Package Manager
+.build/
+.swiftpm/
+Package.resolved
+
+# Fastlane / signing
+*.mobileprovision
+*.p12
+*.cer
+
+# Firmware / reverse-engineering scratch (never commit Sony firmware blobs)
+*.DAT
+firmware/
+re-scratch/
