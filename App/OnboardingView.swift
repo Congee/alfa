@@ -156,8 +156,7 @@ struct OnboardingView: View {
 
     private var checklist: some View {
         VStack(alignment: .leading, spacing: 14) {
-            checkItem("Bluetooth: On", "MENU → Network → Bluetooth")
-            checkItem("Location Info Link: On", "MENU → Network → Loc. Info. Link Set.")
+            checkItem("Bluetooth Function: On", "MENU → Network → Bluetooth")
             checkItem("Cnct. while Power OFF: Off", "MENU → Network → Cnct./PC Remote")
         }
         .multilineTextAlignment(.leading)

@@ -116,5 +116,7 @@ testing; classic `CBCentralManager` + bonding remains the fallback (it is what a
 
 ## User-facing camera-side hard fixes (document in-app where relevant)
 
-Disabling "Cnct. while Power OFF", turning off "Bluetooth Rmt Ctrl", or Airplane Mode all stop the drain outright, and
-**not running competing remote apps simultaneously** is the biggest single win. Alfa should nudge, not fight, these.
+Disabling "Cnct. while Power OFF" (`MENU → Network → Cnct./PC Remote`) or the camera's Airplane Mode both stop the drain
+outright, and **not running competing remote apps simultaneously** is the biggest single win. Alfa should nudge, not
+fight, these. (No camera-side "location link" toggle exists on the A7R V — Alfa enables location itself via the
+`DD30`/`DD31` handshake after bonding, `docs/08` IT-3.)
