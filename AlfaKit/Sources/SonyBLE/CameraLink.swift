@@ -4,7 +4,7 @@ import SonyProtocol
 
 /// Low-level events emitted by ``CameraLink`` (all `Sendable`).
 enum LinkEvent: Sendable, Equatable {
-    case bluetoothState(poweredOn: Bool)
+    case bluetoothAvailability(BluetoothAvailability)
     case discovered(id: UUID, name: String?, rssi: Int, manufacturerData: [UInt8]?)
     /// Services + characteristics discovered and the fw-gated handshake completed. Carries the bonded peripheral's
     /// identifier (remembered for direct retrieval on a later launch) and its advertised name (for the UI indicator).
@@ -39,8 +39,12 @@ final class CameraLink: NSObject, @unchecked Sendable {
     private var enableChar: CBCharacteristic? // DD31
     private var notifyChar: CBCharacteristic? // DD01
 
-    // Camera Control service characteristic (nil until discovered / absent on some bodies).
+    // Camera Control service characteristics (nil until discovered / absent on some bodies).
     private var powerStateChar: CBCharacteristic? // CC05
+    private var timeSyncChar: CBCharacteristic?   // CC13
+    /// Time-sync bytes staged before `CC13` is known (or written the moment it is), so the write survives whichever
+    /// order the location- and camera-control services finish discovery in.
+    private var pendingTimeSync: [UInt8]?
 
     private var knownIdentifier: UUID?
     private var handshakeComplete = false
@@ -134,6 +138,15 @@ final class CameraLink: NSObject, @unchecked Sendable {
         }
     }
 
+    /// Best-effort `CC13` clock sync (beta): stages the bytes and writes them if `CC13` is already known, otherwise
+    /// they flush when it is discovered. A clean no-op on bodies that don't expose `CC13`.
+    func writeTime(_ bytes: [UInt8]) {
+        queue.async { [self] in
+            pendingTimeSync = bytes
+            flushTimeSync()
+        }
+    }
+
     // MARK: - Helpers (all on `queue`)
 
     private func adoptAndConnect(_ peripheral: CBPeripheral) {
@@ -160,6 +173,13 @@ final class CameraLink: NSObject, @unchecked Sendable {
         if manager?.isScanning == true { manager?.stopScan() }
     }
 
+    /// Writes any staged time-sync bytes once `CC13` is known. Called both from `writeTime` and from `CC13` discovery.
+    private func flushTimeSync() {
+        guard let peripheral, let timeSyncChar, let bytes = pendingTimeSync else { return }
+        peripheral.writeValue(Data(bytes), for: timeSyncChar, type: .withResponse)
+        pendingTimeSync = nil
+    }
+
     private func clearPeripheralState() {
         peripheral = nil
         writeChar = nil
@@ -167,6 +187,8 @@ final class CameraLink: NSObject, @unchecked Sendable {
         enableChar = nil
         notifyChar = nil
         powerStateChar = nil
+        timeSyncChar = nil
+        pendingTimeSync = nil
         handshakeComplete = false
         bondRetries = 0
         powerNotifyRetries = 0
@@ -201,7 +223,20 @@ final class CameraLink: NSObject, @unchecked Sendable {
 
 extension CameraLink: CBCentralManagerDelegate {
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
-        onEvent(.bluetoothState(poweredOn: central.state == .poweredOn))
+        onEvent(.bluetoothAvailability(Self.availability(for: central)))
+    }
+
+    /// Maps CoreBluetooth's manager state (+ authorization, to tell "not asked yet" from "denied") to the
+    /// coarse ``BluetoothAvailability`` the onboarding UI needs.
+    private static func availability(for central: CBCentralManager) -> BluetoothAvailability {
+        switch central.state {
+        case .poweredOn: return .ready
+        case .poweredOff: return .poweredOff
+        case .unsupported: return .unsupported
+        case .unauthorized: return .unauthorized
+        case .resetting, .unknown: return CBManager.authorization == .notDetermined ? .notDetermined : .unknown
+        @unknown default: return .unknown
+        }
     }
 
     #if os(iOS)
@@ -276,7 +311,10 @@ extension CameraLink: CBPeripheralDelegate {
                     for: service
                 )
             case SonyCBUUID.cameraControlService:
-                peripheral.discoverCharacteristics([SonyCBUUID.cameraPowerState], for: service)
+                peripheral.discoverCharacteristics(
+                    [SonyCBUUID.cameraPowerState, SonyCBUUID.cameraTimeSync],
+                    for: service
+                )
             default:
                 break
             }
@@ -303,12 +341,21 @@ extension CameraLink: CBPeripheralDelegate {
             if let notifyChar { peripheral.setNotifyValue(true, for: notifyChar) }
             runHandshake()
         case SonyCBUUID.cameraControlService:
-            for characteristic in characteristics where characteristic.uuid == SonyCBUUID.cameraPowerState {
-                powerStateChar = characteristic
-                // Best-effort standby signal: subscribe and read the initial value. May need bonding first (retried
-                // in didUpdateNotificationStateFor); absence of this characteristic is fine — geotagging still works.
-                peripheral.setNotifyValue(true, for: characteristic)
-                peripheral.readValue(for: characteristic)
+            for characteristic in characteristics {
+                switch characteristic.uuid {
+                case SonyCBUUID.cameraPowerState:
+                    powerStateChar = characteristic
+                    // Best-effort standby signal: subscribe and read the initial value. May need bonding first
+                    // (retried in didUpdateNotificationStateFor); absence is fine — geotagging still works.
+                    peripheral.setNotifyValue(true, for: characteristic)
+                    peripheral.readValue(for: characteristic)
+                case SonyCBUUID.cameraTimeSync:
+                    // Best-effort clock sync (beta): flush any staged time packet now that CC13 is known.
+                    timeSyncChar = characteristic
+                    flushTimeSync()
+                default:
+                    break
+                }
             }
         default:
             break

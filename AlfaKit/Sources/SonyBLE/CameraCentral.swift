@@ -14,12 +14,17 @@ public actor CameraCentral {
     /// Republished, UI-facing event stream.
     public nonisolated let events: AsyncStream<CameraEvent>
 
-    private let engine: GeotagPolicyEngine
+    private var engine: GeotagPolicyEngine
     private let bondedStore: BondedCameraStore
     private var state = GeotagState()
     private var link: CameraLink?
     private var pushCount = 0
     private var lastEmittedConnection: CameraConnectionState = .idle
+
+    // Time-sync preferences (mirrored from `GeotagSettings`). `syncTimeZone` gates the DD11 tz/dst block;
+    // `syncClock` gates the best-effort CC13 clock write on connect.
+    private var syncClock = true
+    private var syncTimeZone = true
 
     private let eventContinuation: AsyncStream<CameraEvent>.Continuation
     private let linkEvents: AsyncStream<LinkEvent>
@@ -81,6 +86,19 @@ public actor CameraCentral {
         apply(engine.reduce(&state, .syncRequested))
     }
 
+    /// Applies new connection thresholds (update distance / interval) at runtime. Recreates the pure engine with the
+    /// new config; connection state is untouched, so a threshold change never disturbs a live link.
+    public func setPolicy(_ policy: ConnectionPolicy) {
+        engine = GeotagPolicyEngine(config: policy)
+    }
+
+    /// Sets the time-sync preferences: `clock` gates the best-effort CC13 write on connect; `timeZone` gates the
+    /// DD11 tz/dst block on each location push.
+    public func setTimeSync(clock: Bool, timeZone: Bool) {
+        syncClock = clock
+        syncTimeZone = timeZone
+    }
+
     /// Forgets the remembered camera: clears persistence and gracefully drops any live link so the engine returns to a
     /// clean state (the resulting disconnect backs the policy off). The next Sync/enable scans afresh.
     public func forgetCamera() {
@@ -97,8 +115,11 @@ public actor CameraCentral {
 
     private func handle(_ event: LinkEvent) {
         switch event {
-        case let .bluetoothState(poweredOn):
-            apply(engine.reduce(&state, .bluetoothState(ready: poweredOn)))
+        case let .bluetoothAvailability(availability):
+            // Surface the fine-grained availability to the onboarding/permissions UI, then feed the coarse
+            // ready/not-ready bit to the pure reducer (its input is unchanged).
+            eventContinuation.yield(.bluetoothAvailability(availability))
+            apply(engine.reduce(&state, .bluetoothState(ready: availability == .ready)))
 
         case let .discovered(id, name, rssi, manufacturerData):
             let model = manufacturerData.flatMap { SonyAdvertisement(manufacturerData: $0)?.modelCode } ?? name
@@ -108,6 +129,11 @@ public actor CameraCentral {
             // Remember this bonded, location-capable camera so a later launch retrieves it directly, no scan needed.
             bondedStore.save(RememberedCamera(id: id, name: name))
             eventContinuation.yield(.cameraIdentified(peripheralID: id, name: name))
+            // Best-effort clock sync (beta): the link no-ops when CC13 is absent.
+            if syncClock {
+                let packet = SonyTimePacket(date: Date(), timeZone: .current)
+                link?.writeTime(packet.encoded())
+            }
             apply(engine.reduce(&state, .connected))
 
         case .connectFailed:
@@ -148,11 +174,13 @@ public actor CameraCentral {
             case .backOff:
                 link?.backOff()
             case let .pushLocation(fix):
+                // `syncTimeZone` gates the tz/dst block (offset-5 flag): with it off, the shorter 91-byte packet is
+                // sent (the UTC clock itself is protocol-mandatory in DD11 and always rides along).
                 let packet = SonyLocationPacket(
                     latitude: fix.latitude,
                     longitude: fix.longitude,
                     date: fix.timestamp,
-                    timeZone: .current
+                    timeZone: syncTimeZone ? .current : nil
                 )
                 link?.writeLocation(packet.encoded())
             }

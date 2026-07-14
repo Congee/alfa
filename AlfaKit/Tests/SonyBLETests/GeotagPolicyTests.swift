@@ -12,6 +12,29 @@ struct GeotagPolicyTests {
         LocationFix(latitude: latitude, longitude: longitude, timestamp: Date(timeIntervalSince1970: 0), horizontalAccuracyMeters: 5)
     }
 
+    private func fix(_ latitude: Double, _ longitude: Double, at seconds: TimeInterval) -> LocationFix {
+        LocationFix(latitude: latitude, longitude: longitude, timestamp: Date(timeIntervalSince1970: seconds), horizontalAccuracyMeters: 5)
+    }
+
+    /// Engine that also enforces a 30 s minimum interval between pushes (distance stays at the balanced 25 m).
+    private var intervalEngine: GeotagPolicyEngine {
+        GeotagPolicyEngine(config: ConnectionPolicy(
+            minimumDistanceMeters: 25,
+            minimumIntervalSeconds: 30,
+            stayConnectedWhileCameraOn: true,
+            backOffInStandby: true
+        ))
+    }
+
+    private func connectedState(_ engine: GeotagPolicyEngine, latest: LocationFix) -> GeotagState {
+        var state = GeotagState()
+        state.bluetoothReady = true
+        _ = engine.reduce(&state, .setEnabled(true))
+        state.latest = latest
+        _ = engine.reduce(&state, .connected) // pushes `latest`; lastPushed = latest
+        return state
+    }
+
     private func enabledAndConnected() -> GeotagState {
         var state = GeotagState()
         state.bluetoothReady = true
@@ -123,5 +146,27 @@ struct GeotagPolicyTests {
         let actions = engine.reduce(&state, .bluetoothState(ready: false))
         #expect(actions.isEmpty)
         #expect(state.connection == .unavailable)
+    }
+
+    @Test("Interval throttle blocks a moved-far fix until enough time has elapsed")
+    func intervalThrottleBlocksUntilElapsed() {
+        let engine = intervalEngine
+        var state = connectedState(engine, latest: fix(0, 0, at: 0))
+
+        // ~111 m away but only 10 s later → interval gate fails → blocked.
+        #expect(engine.reduce(&state, .location(fix(0, 0.001, at: 10))).isEmpty)
+
+        // ~111 m away and 40 s after the last push → both gates clear → pushes.
+        let far = fix(0, 0.001, at: 40)
+        #expect(engine.reduce(&state, .location(far)) == [.pushLocation(far)])
+    }
+
+    @Test("Interval elapsing without movement still does not push (both gates required)")
+    func intervalWithoutMovementDoesNotPush() {
+        let engine = intervalEngine
+        var state = connectedState(engine, latest: fix(0, 0, at: 0))
+
+        // 100 s later but essentially stationary (~1 m) → distance gate fails → no push.
+        #expect(engine.reduce(&state, .location(fix(0, 0.00001, at: 100))).isEmpty)
     }
 }

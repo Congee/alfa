@@ -18,18 +18,39 @@ public final class GeotagCoordinator {
     public private(set) var lastFix: LocationFix?
     public private(set) var pushCount = 0
     public private(set) var lastError: String?
-    public private(set) var locationAuthorized = false
+    /// System Bluetooth availability (for the onboarding/permissions UI).
+    public private(set) var bluetooth: BluetoothAvailability = .unknown
+    /// Location permission state (for the onboarding/permissions UI).
+    public private(set) var locationAuthorization: LocationAuthorization
+    /// Convenience: whether location is usable for geotagging at all.
+    public var locationAuthorized: Bool { locationAuthorization.isGranted }
+    /// User-tunable geotag settings (distance, interval, time sync). Persisted; mirrored into the engine.
+    public private(set) var settings: GeotagSettings
+    /// Whether the user has finished first-run onboarding. Persisted.
+    public private(set) var hasCompletedOnboarding: Bool
 
     private let central: CameraCentral
     private let location = LocationProvider()
-    private let minimumDistanceMeters: Double
+    private let settingsStore: GeotagSettingsStore
+    private let defaults: UserDefaults
+    private var minimumDistanceMeters: Double
     private var started = false
     private var tasks: [Task<Void, Never>] = []
 
-    public init(policy: ConnectionPolicy = .balanced) {
-        central = CameraCentral(policy: policy)
-        minimumDistanceMeters = policy.minimumDistanceMeters
-        locationAuthorized = location.authorizationStatus.isGranted
+    private static let onboardingKey = "me.congee.alfa.hasCompletedOnboarding"
+
+    public init(
+        settingsStore: GeotagSettingsStore = UserDefaultsGeotagSettingsStore(),
+        defaults: UserDefaults = .standard
+    ) {
+        self.settingsStore = settingsStore
+        self.defaults = defaults
+        let loaded = settingsStore.load()
+        settings = loaded
+        central = CameraCentral(policy: loaded.policy())
+        minimumDistanceMeters = loaded.distanceMeters
+        locationAuthorization = location.authorizationStatus.locationAuthorization
+        hasCompletedOnboarding = defaults.bool(forKey: Self.onboardingKey)
     }
 
     // The pipeline tasks capture `[weak self]` and iterate streams owned by this coordinator; when it deallocates the
@@ -44,10 +65,12 @@ public final class GeotagCoordinator {
         guard !isEnabled else { return }
         isEnabled = true
         startPipelinesIfNeeded()
+        escalateLocationPermission()
         location.setDistanceFilter(minimumDistanceMeters)
         location.start()
         Task {
             await central.start()
+            await applySettingsToCentral()
             await central.setEnabled(true)
         }
     }
@@ -65,6 +88,57 @@ public final class GeotagCoordinator {
     /// Explicit low-frequency trigger to re-establish the link and push the current location.
     public func syncNow() {
         Task { await central.requestSync() }
+    }
+
+    // MARK: - Permissions (onboarding)
+
+    /// Triggers the system Bluetooth prompt (by creating the CoreBluetooth manager) and starts observing
+    /// availability — **without** enabling geotagging. Used by the onboarding Bluetooth step.
+    public func requestBluetooth() {
+        startPipelinesIfNeeded()
+        Task { await central.start() }
+    }
+
+    /// Requests "While Using the App" location access (the first onboarding location step).
+    public func requestLocationWhenInUse() {
+        location.requestWhenInUse()
+    }
+
+    /// Requests the upgrade to "Always" — shown after a successful pair, per Apple's/Geotag Alpha's guidance.
+    public func requestLocationAlways() {
+        location.requestAlways()
+    }
+
+    /// Marks first-run onboarding complete (persisted) so it isn't shown again next launch.
+    public func completeOnboarding() {
+        hasCompletedOnboarding = true
+        defaults.set(true, forKey: Self.onboardingKey)
+    }
+
+    // MARK: - Settings
+
+    /// Updates and persists geotag settings, mirroring the change into the engine (thresholds + time sync) and the
+    /// CoreLocation distance filter. Safe to call while connected — a threshold change never disturbs a live link.
+    public func updateSettings(_ newSettings: GeotagSettings) {
+        settings = newSettings
+        settingsStore.save(newSettings)
+        minimumDistanceMeters = newSettings.distanceMeters
+        location.setDistanceFilter(newSettings.distanceMeters)
+        Task { await applySettingsToCentral() }
+    }
+
+    private func applySettingsToCentral() async {
+        await central.setPolicy(settings.policy())
+        await central.setTimeSync(clock: settings.syncClock, timeZone: settings.syncTimeZone)
+    }
+
+    /// Escalates location permission one step toward Always when geotagging is enabled outside the guided flow.
+    private func escalateLocationPermission() {
+        switch locationAuthorization {
+        case .notDetermined: location.requestWhenInUse()
+        case .whenInUse: location.requestAlways()
+        case .denied, .always: break
+        }
     }
 
     /// Forgets the current camera: clears its identity immediately (visible feedback) and tells the engine to
@@ -133,7 +207,7 @@ public final class GeotagCoordinator {
         tasks.append(Task { [weak self] in
             for await status in auths {
                 guard let self else { return }
-                self.locationAuthorized = status.isGranted
+                self.locationAuthorization = status.locationAuthorization
             }
         })
     }
@@ -141,6 +215,7 @@ public final class GeotagCoordinator {
     private func handle(_ event: CameraEvent) {
         switch event {
         case let .stateChanged(state): connection = state
+        case let .bluetoothAvailability(availability): bluetooth = availability
         case .discovered: break
         case let .cameraIdentified(_, name): cameraName = name ?? "Sony camera"
         case let .locationPushed(count): pushCount = count

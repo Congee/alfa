@@ -102,8 +102,13 @@ public struct GeotagPolicyEngine: Sendable {
             state.latest = fix
             // Only push while genuinely connected — never let a location update wake a standby camera.
             guard state.connection == .connected else { return [] }
-            if let last = state.lastPushed, fix.distance(to: last) < config.minimumDistanceMeters {
-                return []
+            if let last = state.lastPushed {
+                // Both gates must clear: moved far enough AND (if an interval is set) waited long enough. The first
+                // fix after connect has no `lastPushed`, so it always pushes (that push doubles as the time sync).
+                let movedEnough = fix.distance(to: last) >= config.minimumDistanceMeters
+                let waitedEnough = config.minimumIntervalSeconds <= 0
+                    || fix.timestamp.timeIntervalSince(last.timestamp) >= config.minimumIntervalSeconds
+                guard movedEnough, waitedEnough else { return [] }
             }
             state.lastPushed = fix
             return [.pushLocation(fix)]

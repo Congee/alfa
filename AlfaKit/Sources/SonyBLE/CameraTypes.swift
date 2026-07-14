@@ -20,9 +20,29 @@ public enum CameraConnectionState: Sendable, Equatable {
     }
 }
 
+/// System Bluetooth availability, surfaced to the onboarding/permissions UI. Distinct from
+/// ``CameraConnectionState`` (which is about the camera link): this is the state of the phone's Bluetooth stack and
+/// the app's authorization to use it.
+public enum BluetoothAvailability: Sendable, Equatable {
+    /// State not yet reported by CoreBluetooth (manager still initializing).
+    case unknown
+    /// The user has not yet been asked for Bluetooth permission.
+    case notDetermined
+    /// The user denied (or restricted) Bluetooth permission for Alfa.
+    case unauthorized
+    /// Bluetooth is turned off in Control Center / Settings.
+    case poweredOff
+    /// This device has no Bluetooth LE support.
+    case unsupported
+    /// Bluetooth is on and authorized — ready to use.
+    case ready
+}
+
 /// Events emitted by ``CameraCentral`` as an `AsyncStream`. All associated values are `Sendable`.
 public enum CameraEvent: Sendable, Equatable {
     case stateChanged(CameraConnectionState)
+    /// System Bluetooth availability changed (for the permissions/onboarding UI).
+    case bluetoothAvailability(BluetoothAvailability)
     case discovered(peripheralID: UUID, modelCode: String?, rssi: Int)
     /// The connected camera's identity (its advertised name), for the UI's camera indicator.
     case cameraIdentified(peripheralID: UUID, name: String?)
@@ -34,6 +54,9 @@ public enum CameraEvent: Sendable, Equatable {
 public struct ConnectionPolicy: Sendable, Equatable {
     /// Minimum movement (meters) before pushing a new location while connected.
     public var minimumDistanceMeters: Double
+    /// Minimum time (seconds) between location pushes while connected. `0` disables the interval throttle (push is
+    /// then governed by distance alone). Complements `minimumDistanceMeters` — both gates must clear.
+    public var minimumIntervalSeconds: TimeInterval
     /// Keep the link while the camera is powered on (fresh per-shot geotags).
     public var stayConnectedWhileCameraOn: Bool
     /// Never hold a standing `connect()` or auto-reconnect while the camera is in standby.
@@ -41,17 +64,21 @@ public struct ConnectionPolicy: Sendable, Equatable {
 
     public init(
         minimumDistanceMeters: Double,
+        minimumIntervalSeconds: TimeInterval = 0,
         stayConnectedWhileCameraOn: Bool,
         backOffInStandby: Bool
     ) {
         self.minimumDistanceMeters = minimumDistanceMeters
+        self.minimumIntervalSeconds = minimumIntervalSeconds
         self.stayConnectedWhileCameraOn = stayConnectedWhileCameraOn
         self.backOffInStandby = backOffInStandby
     }
 
-    /// The locked Phase 1 default (decision D4): connected while on, fully backed off in standby.
+    /// The locked Phase 1 default (decision D4): connected while on, fully backed off in standby. The interval
+    /// throttle is off by default (distance-only), matching the pre-settings behavior.
     public static let balanced = ConnectionPolicy(
         minimumDistanceMeters: 25,
+        minimumIntervalSeconds: 0,
         stayConnectedWhileCameraOn: true,
         backOffInStandby: true
     )
