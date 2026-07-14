@@ -18,5 +18,7 @@ let package = Package(
         // CoreLocation + geotag orchestration.
         .target(name: "AlfaGeotag", dependencies: ["SonyBLE"]),
         .testTarget(name: "SonyProtocolTests", dependencies: ["SonyProtocol"]),
+        // Pure policy-reducer tests — run on the host, no device needed (SonyBLE builds on macOS).
+        .testTarget(name: "SonyBLETests", dependencies: ["SonyBLE"]),
     ]
 )

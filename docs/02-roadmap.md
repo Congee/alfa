@@ -14,16 +14,21 @@ previous phase's success criteria are met on real hardware.
 
 The core of the project. Deliver GPS + time sync **and** the "good BLE citizen" connection engine.
 
-- [ ] `SonyBLE.CameraCentral` actor: scan (filtered by Sony company ID `0x012D`), discover, bond (via notify-subscribe
-      pairing trick), retrieve already-connected peripherals, connect/disconnect lifecycle, event stream.
-- [ ] Firmware-gated location handshake: probe for `DD30`/`DD31`, write `0x01` before location writes, `0x00` before
-      disconnect (skip cleanly on older firmware).
-- [ ] `AlfaGeotag.GeotagCoordinator`: CoreLocation significant-change + on-demand precise fixes; "Balanced" policy
-      state machine (connected-while-on, backed-off-in-standby).
-- [ ] Time + time-zone sync on connect.
-- [ ] Background operation: `bluetooth-central` + Location "Always", CoreBluetooth state restoration.
-- [ ] SwiftUI UI: camera list, per-camera status (connected/standby, last fix, update count, battery if reported),
-      enable/disable, pairing flow, permissions onboarding.
+- [x] Pure `GeotagPolicyEngine` reducer encoding the Balanced policy + anti-churn invariants; host-unit-tested
+      (`SonyBLETests`: disconnect/connect-fail/standby-location never issue a new connect or scan).
+- [x] `SonyBLE.CameraCentral` actor + `CameraLink`: scan (company-ID `0x012D` filter in `didDiscover`), discover, bond
+      (notify-subscribe trick with ATT 5/15 retries), `retrieveConnectedPeripherals`, bounded-scan connect/disconnect
+      lifecycle, `Sendable` event stream. *(implemented + builds; pending A7R V validation)*
+- [x] Firmware-gated location handshake: probe for `DD30`/`DD31`, write `0x01` before location writes, `0x00` before
+      disconnect (skips cleanly when the characteristics are absent).
+- [x] `AlfaGeotag.GeotagCoordinator` + `LocationProvider`: CoreLocation updates (distance-filtered); "Balanced" policy
+      state machine (connected-while-on, backed-off-in-standby) driven by the pure reducer.
+- [x] Time + time-zone sync on connect (rides the location packet's UTC + tz/dst block).
+- [~] Background operation: `bluetooth-central` + Location "Always" background modes wired; `CBCentralManager` restore
+      identifier + `willRestoreState` handled. *TODO: persist the bonded peripheral UUID and full background-relaunch flow.*
+- [~] SwiftUI UI: status (connection, auth, fixes pushed, last fix, errors), enable/disable, "Sync now". *TODO: camera
+      list / multi-camera, pairing flow, permissions onboarding, camera battery if reported.*
+- [ ] Observe `CC05` power-state to feed the policy's `cameraPoweredOff` input (currently inferred from disconnect).
 - [ ] On-device validation on A7R V fw 4.0, including the standby-drain success criterion.
 
 ## Phase 2 — Remote control (foreground)

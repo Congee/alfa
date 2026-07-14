@@ -26,11 +26,16 @@ Alfa/
     │   │   ├── RemoteCommand.swift    # button press/release codes, FF02 status parsing
     │   │   └── Advertisement.swift    # Sony manufacturer-data parser
     │   ├── SonyBLE/          # CoreBluetooth engine. Depends on SonyProtocol.
-    │   │   └── CameraCentral.swift    # actor: scan/bond/connect/write lifecycle + event stream (Phase 1 impl)
+    │   │   ├── CameraTypes.swift      # CameraConnectionState, CameraEvent, ConnectionPolicy, LocationFix (pure)
+    │   │   ├── GeotagPolicy.swift     # PURE Balanced-policy reducer (host-tested, no CoreBluetooth)
+    │   │   ├── CameraLink.swift       # CoreBluetooth confinement — queue-confined @unchecked Sendable "hands"
+    │   │   └── CameraCentral.swift    # actor "brain": policy state + link + republished event stream
     │   └── AlfaGeotag/       # CoreLocation + geotag orchestration. Depends on SonyBLE.
-    │       └── GeotagCoordinator.swift# Balanced-policy state machine (Phase 1 impl)
+    │       ├── LocationProvider.swift # CoreLocation → Sendable LocationFix / authorization streams
+    │       └── GeotagCoordinator.swift# @MainActor @Observable façade: pipes location in, mirrors events out
     └── Tests/
-        └── SonyProtocolTests/         # Swift Testing, pure, host-runnable
+        ├── SonyProtocolTests/         # Swift Testing, pure, host-runnable
+        └── SonyBLETests/              # Balanced-policy reducer invariants (host-runnable)
 ```
 
 Why a package rather than app-only groups: the pure and BLE logic must be shareable with the future Watch app,
@@ -45,14 +50,21 @@ test loop.
 
 | Type | Isolation | Notes |
 |------|-----------|-------|
-| `SonyLocationPacket`, `SonyRemoteCommand`, `SonyAdvertisement` | `Sendable` value types | pure, immutable |
-| `CameraCentral` | `actor` | owns `CBCentralManager`; the `CBCentralManagerDelegate`/`CBPeripheralDelegate` callbacks hop onto the actor. Emits `AsyncStream<CameraEvent>` (events are `Sendable`). |
-| `GeotagCoordinator` | `actor` (or `@MainActor` observable façade over an actor) | owns the Balanced-policy state machine and `CLLocationManager`. |
+| `SonyLocationPacket`, `SonyRemoteCommand`, `SonyAdvertisement`, `LocationFix` | `Sendable` value types | pure, immutable |
+| `GeotagPolicyEngine` + `GeotagState` | pure `struct` reducer | the Balanced-policy decision logic; no I/O, host-unit-tested |
+| `CameraCentral` | `actor` (the "brain") | owns `GeotagState` + a `CameraLink`; consumes `Sendable` `LinkEvent`s in order, runs the reducer, issues link commands, republishes `AsyncStream<CameraEvent>`. Touches no `CB*` object. |
+| `CameraLink` | `final class`, `@unchecked Sendable` (the "hands") | owns `CBCentralManager`/`CBPeripheral`, confined to a private serial `DispatchQueue`; `CBCentralManagerDelegate`/`CBPeripheralDelegate` callbacks arrive on that queue. |
+| `LocationProvider` | `final class`, `@unchecked Sendable` | wraps `CLLocationManager` (main-confined); vends `Sendable` `LocationFix`/auth `AsyncStream`s. |
+| `GeotagCoordinator` | `@MainActor`, `@Observable` façade | pipes location samples into `CameraCentral`, mirrors its events into observable UI state. |
 | View models / UI | `@MainActor`, `@Observable` | subscribe to engine events; never touch CoreBluetooth directly. |
 
-CoreBluetooth requires a consistent dispatch queue; the engine actor provides a serial executor / dedicated queue and
-keeps all `CB*` objects confined to it. `CBPeripheral`/`CBCentralManager` are **not** `Sendable`, so they never cross
-the actor boundary — only extracted `Sendable` snapshots do.
+CoreBluetooth requires a consistent dispatch queue. Rather than give the actor a custom executor, the design **splits
+brain from hands**: `CameraLink` confines every `CB*` object to one private serial queue (its public commands hop onto
+it; every delegate callback arrives on it), and the `CameraCentral` actor never touches a `CB*` object at all. Only
+`Sendable` values cross between them — `LinkEvent`s outbound (via a `@Sendable` closure into an `AsyncStream`), command
+calls with `Sendable` arguments inbound. That confinement is the written justification for `CameraLink`'s and
+`LocationProvider`'s `@unchecked Sendable`. `CBPeripheral`/`CBCentralManager` are **not** `Sendable` and never leave
+their queue.
 
 ## Key runtime flows (Phase 1)
 

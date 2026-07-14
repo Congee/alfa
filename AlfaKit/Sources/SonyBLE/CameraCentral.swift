@@ -2,79 +2,135 @@ import CoreBluetooth
 import Foundation
 import SonyProtocol
 
-/// High-level connection state of a camera link.
-public enum CameraConnectionState: Sendable, Equatable {
-    case idle
-    case scanning
-    case connecting
-    case connected
-    /// Camera is in standby; the engine has deliberately backed off (no standing connect, no auto-reconnect).
-    case backedOff
-    case unavailable
-}
-
-/// Events emitted by ``CameraCentral`` as an `AsyncStream`. All associated values are `Sendable`.
-public enum CameraEvent: Sendable, Equatable {
-    case stateChanged(CameraConnectionState)
-    case discovered(peripheralID: UUID, modelCode: String?, rssi: Int)
-    case failure(String)
-}
-
-/// Tunable connection behavior. See `docs/05-battery-strategy.md`.
-public struct ConnectionPolicy: Sendable, Equatable {
-    /// Minimum movement (meters) before pushing a new location while connected.
-    public var minimumDistanceMeters: Double
-    /// Keep the link while the camera is powered on (fresh per-shot geotags).
-    public var stayConnectedWhileCameraOn: Bool
-    /// Never hold a standing `connect()` or auto-reconnect while the camera is in standby.
-    public var backOffInStandby: Bool
-
-    public init(
-        minimumDistanceMeters: Double,
-        stayConnectedWhileCameraOn: Bool,
-        backOffInStandby: Bool
-    ) {
-        self.minimumDistanceMeters = minimumDistanceMeters
-        self.stayConnectedWhileCameraOn = stayConnectedWhileCameraOn
-        self.backOffInStandby = backOffInStandby
-    }
-
-    /// The locked Phase 1 default (decision D4): connected while on, fully backed off in standby.
-    public static let balanced = ConnectionPolicy(
-        minimumDistanceMeters: 25,
-        stayConnectedWhileCameraOn: true,
-        backOffInStandby: true
-    )
-}
-
-/// The CoreBluetooth central engine.
+/// The connection engine's "brain": an `actor` that owns the pure ``GeotagPolicyEngine`` state and a ``CameraLink``
+/// (the CoreBluetooth "hands"). It consumes `LinkEvent`s in order, runs them through the policy, applies the resulting
+/// actions as link commands, and republishes `Sendable` ``CameraEvent``s on ``events``.
 ///
-/// An `actor` that will own a `CBCentralManager` on a dedicated queue and confine all non-`Sendable` `CB*` objects to
-/// its executor, emitting only `Sendable` snapshots via ``events``.
-///
-/// - Important: The connection lifecycle is **not** yet implemented. It must be built directly from the CoreBluetooth
-///   semantics in `docs/05-battery-strategy.md` (scan/connect only when needed, disconnect promptly, no standing
-///   connect or aggressive reconnect in standby) — **not** ported from `Saschl/alpha-gps`, whose lifecycle reproduces
-///   the very drain this project fixes.
+/// The lifecycle is built from CoreBluetooth semantics (`docs/05-battery-strategy.md`) — **not** ported from
+/// `Saschl/alpha-gps`, whose lifecycle reproduces the very standby drain this project fixes.
 public actor CameraCentral {
     public let policy: ConnectionPolicy
 
+    /// Republished, UI-facing event stream.
+    public nonisolated let events: AsyncStream<CameraEvent>
+
+    private let engine: GeotagPolicyEngine
+    private var state = GeotagState()
+    private var link: CameraLink?
+    private var pushCount = 0
+    private var lastEmittedConnection: CameraConnectionState = .idle
+
+    private let eventContinuation: AsyncStream<CameraEvent>.Continuation
+    private let linkEvents: AsyncStream<LinkEvent>
+    private let linkEventContinuation: AsyncStream<LinkEvent>.Continuation
+    private var consumeTask: Task<Void, Never>?
+
     public init(policy: ConnectionPolicy = .balanced) {
         self.policy = policy
+        engine = GeotagPolicyEngine(config: policy)
+        (events, eventContinuation) = AsyncStream.makeStream(of: CameraEvent.self)
+        (linkEvents, linkEventContinuation) = AsyncStream.makeStream(of: LinkEvent.self)
     }
 
-    /// Begins observing for the paired camera under the current policy.
-    ///
-    /// TODO(Phase 1): create `CBCentralManager` (dedicated queue, opt-in state restoration), prefer
-    /// `retrieveConnectedPeripherals`, scan filtered by company ID `0x012D`, drive the Balanced state machine.
+    // MARK: - Public API
+
+    /// Creates the CoreBluetooth manager and begins consuming link events. Idempotent.
     public func start() {
-        // Intentionally unimplemented — see docs/02-roadmap.md (Phase 1).
+        guard link == nil else { return }
+        let continuation = linkEventContinuation
+        let newLink = CameraLink(
+            restoreIdentifier: "me.congee.alfa.central",
+            knownIdentifier: nil, // TODO(Phase 1): persist the bonded peripheral's UUID across launches
+            onEvent: { continuation.yield($0) }
+        )
+        link = newLink
+
+        let stream = linkEvents
+        consumeTask = Task { [weak self] in
+            for await event in stream {
+                await self?.handle(event)
+            }
+        }
+        newLink.activate()
     }
 
-    /// Cleanly tears down: cancel pending connections, stop scanning, release the link.
-    ///
-    /// TODO(Phase 1).
+    /// Fully releases the CoreBluetooth link and stops event consumption.
     public func stop() {
-        // Intentionally unimplemented — see docs/02-roadmap.md (Phase 1).
+        apply(engine.reduce(&state, .setEnabled(false)))
+        link?.deactivate()
+        link = nil
+        consumeTask?.cancel()
+        consumeTask = nil
+    }
+
+    public func setEnabled(_ enabled: Bool) {
+        apply(engine.reduce(&state, .setEnabled(enabled)))
+    }
+
+    public func submitLocation(_ fix: LocationFix) {
+        apply(engine.reduce(&state, .location(fix)))
+    }
+
+    /// The sanctioned, explicit trigger to leave back-off and re-establish the link (e.g. a "Sync now" button).
+    public func requestSync() {
+        apply(engine.reduce(&state, .syncRequested))
+    }
+
+    // MARK: - Link event handling
+
+    private func handle(_ event: LinkEvent) {
+        switch event {
+        case let .bluetoothState(poweredOn):
+            apply(engine.reduce(&state, .bluetoothState(ready: poweredOn)))
+
+        case let .discovered(id, name, rssi, manufacturerData):
+            let model = manufacturerData.flatMap { SonyAdvertisement(manufacturerData: $0)?.modelCode } ?? name
+            eventContinuation.yield(.discovered(peripheralID: id, modelCode: model, rssi: rssi))
+
+        case .ready:
+            apply(engine.reduce(&state, .connected))
+
+        case .connectFailed:
+            apply(engine.reduce(&state, .connectFailed))
+
+        case .disconnected:
+            apply(engine.reduce(&state, .disconnected))
+
+        case .wroteLocation:
+            pushCount += 1
+            eventContinuation.yield(.locationPushed(count: pushCount))
+
+        case .notify:
+            break // Phase 1: DD01 location-enabled flag observed but not yet acted upon.
+
+        case let .failure(message):
+            eventContinuation.yield(.failure(message))
+        }
+    }
+
+    /// Emits a state change if the connection state moved, then performs each policy action as a link command.
+    private func apply(_ actions: [GeotagAction]) {
+        if state.connection != lastEmittedConnection {
+            lastEmittedConnection = state.connection
+            eventContinuation.yield(.stateChanged(state.connection))
+        }
+        for action in actions {
+            switch action {
+            case .beginDiscovery:
+                link?.beginDiscovery()
+            case .cancelDiscoveryAndDisconnect:
+                link?.disconnect()
+            case .backOff:
+                link?.backOff()
+            case let .pushLocation(fix):
+                let packet = SonyLocationPacket(
+                    latitude: fix.latitude,
+                    longitude: fix.longitude,
+                    date: fix.timestamp,
+                    timeZone: .current
+                )
+                link?.writeLocation(packet.encoded())
+            }
+        }
     }
 }
