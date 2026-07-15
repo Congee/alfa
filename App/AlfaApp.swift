@@ -7,7 +7,7 @@ struct AlfaApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView(coordinator: appDelegate.coordinator)
+            ContentView(session: appDelegate.session)
         }
         // Drive the engine's foreground/background awareness: foreground reconnects scan and gate on the camera's
         // advertised power state; background reconnects hold a standing connect (kept across backgrounding) so the
@@ -15,7 +15,7 @@ struct AlfaApp: App {
         // `onChange` otherwise skips the initial value — but the authoritative launch-time seed lives in the
         // coordinator (read synchronously from UIKit), because on a background relaunch this scene may not exist yet.
         .onChange(of: scenePhase, initial: true) { _, phase in
-            appDelegate.coordinator.setForeground(phase == .active)
+            appDelegate.session.geotag.setForeground(phase == .active)
         }
     }
 }

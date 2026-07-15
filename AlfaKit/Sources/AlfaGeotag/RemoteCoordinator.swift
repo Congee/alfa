@@ -44,6 +44,8 @@ public final class RemoteCoordinator {
     public private(set) var recordingStartedAt: Date?
     /// Wire-observed exposure start (any trigger, including the physical shutter button).
     public private(set) var exposureStartedAt: Date?
+    /// When the last exposure completed — anchors the transient long-exposure-NR countdown.
+    public private(set) var exposureEndedAt: Date?
     /// Duration of the last completed exposure. For long exposures this is also the in-camera noise-reduction
     /// *estimate* (the protocol has no NR signal; the second exposure is about as long as the first).
     public private(set) var lastExposureSeconds: Double?
@@ -146,6 +148,9 @@ public final class RemoteCoordinator {
         isShutterEngaged = state.shutter != .idle
         isRecording = state.isRecording
         recordingStartedAt = state.recordingStartedAt
+        if exposureStartedAt != nil, state.exposureStartedAt == nil {
+            exposureEndedAt = Date() // the edge the NR-countdown display hangs off
+        }
         exposureStartedAt = state.exposureStartedAt
         lastExposureSeconds = state.lastExposureSeconds
         failureDescription = state.lastFailure.map(Self.describe)
