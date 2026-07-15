@@ -22,9 +22,18 @@ public actor CameraCentral {
     private var lastEmittedConnection: CameraConnectionState = .idle
 
     // Time-sync preferences (mirrored from `GeotagSettings`). `syncTimeZone` gates the DD11 tz/dst block;
-    // `syncClock` gates the best-effort CC13 clock write on connect.
+    // `syncClock` gates the best-effort CC13 clock write on connect; `useGPSTime` sources that write from the
+    // GNSS fix's timestamp instead of the device clock.
     private var syncClock = true
     private var syncTimeZone = true
+    private var useGPSTime = false
+    // Most recent fix from the location pipeline — the "Use GPS time" clock source for the CC13 write.
+    private var lastFix: LocationFix?
+    // Set when a `.ready` wanted a GPS-time clock write but no fresh fix existed yet; the next submitted fix
+    // carries a current timestamp and flushes the write (only while connected — never toward a standby camera).
+    private var pendingGPSClockSync = false
+    /// A fix older than this is unusable as a clock source — writing its timestamp would set the camera slow.
+    private static let gpsClockFreshnessSeconds: TimeInterval = 10
     // Mirrored from `GeotagSettings.backgroundResume`: hold a standing connect on a dropped link for background
     // auto-resume. Stored here so it survives a `link` recreation (re-applied in `start()`).
     private var backgroundResume = false
@@ -103,6 +112,11 @@ public actor CameraCentral {
     }
 
     public func submitLocation(_ fix: LocationFix) {
+        lastFix = fix
+        if pendingGPSClockSync, state.connection == .connected {
+            pendingGPSClockSync = false
+            writeClockSync(now: Date())
+        }
         apply(engine.reduce(&state, .location(fix)))
     }
 
@@ -125,10 +139,12 @@ public actor CameraCentral {
     }
 
     /// Sets the time-sync preferences: `clock` gates the best-effort CC13 write on connect; `timeZone` gates the
-    /// DD11 tz/dst block on each location push.
-    public func setTimeSync(clock: Bool, timeZone: Bool) {
+    /// DD11 tz/dst block on each location push; `gpsTime` sources the CC13 clock from the latest GNSS fix's
+    /// timestamp instead of the device clock.
+    public func setTimeSync(clock: Bool, timeZone: Bool, gpsTime: Bool) {
         syncClock = clock
         syncTimeZone = timeZone
+        useGPSTime = gpsTime
     }
 
     /// Toggles background auto-resume (a standing connect on a dropped link vs. the conservative scan-and-gate). See
@@ -175,10 +191,8 @@ public actor CameraCentral {
             bondedStore.save(RememberedCamera(id: id, name: name, connectsWhilePoweredOff: cwpo))
             eventContinuation.yield(.cameraIdentified(peripheralID: id, name: name))
             // Best-effort clock sync (beta): the link no-ops when CC13 is absent.
-            if syncClock {
-                let packet = SonyTimePacket(date: Date(), timeZone: .current)
-                link?.writeTime(packet.encoded())
-            }
+            pendingGPSClockSync = false
+            writeClockSync(now: Date())
             apply(engine.reduce(&state, .connected))
 
         case .connectFailed:
@@ -207,6 +221,24 @@ public actor CameraCentral {
         case let .failure(message):
             eventContinuation.yield(.failure(message))
         }
+    }
+
+    /// Best-effort CC13 clock write (the link no-ops when CC13 is absent). With "Use GPS time" on, the clock source
+    /// is the latest GNSS fix's timestamp — but only a fresh one (a stale timestamp would set the camera slow);
+    /// otherwise the write waits for the next submitted fix. With it off, the device clock is written immediately.
+    private func writeClockSync(now: Date) {
+        guard syncClock else { return }
+        let date: Date
+        if useGPSTime {
+            guard let fix = lastFix, now.timeIntervalSince(fix.timestamp) < Self.gpsClockFreshnessSeconds else {
+                pendingGPSClockSync = true // flushed by the next `submitLocation` while connected
+                return
+            }
+            date = fix.timestamp
+        } else {
+            date = now
+        }
+        link?.writeTime(SonyTimePacket(date: date, timeZone: .current).encoded())
     }
 
     /// Emits a state change if the connection state moved, then performs each policy action as a link command.

@@ -205,7 +205,11 @@ public final class GeotagCoordinator {
 
     private func applySettingsToCentral() async {
         await central.setPolicy(settings.policy())
-        await central.setTimeSync(clock: settings.syncClock, timeZone: settings.syncTimeZone)
+        await central.setTimeSync(
+            clock: settings.syncClock,
+            timeZone: settings.syncTimeZone,
+            gpsTime: settings.useGPSTime
+        )
         await central.setBackgroundResume(settings.backgroundResume)
     }
 
@@ -304,6 +308,7 @@ public final class GeotagCoordinator {
     public var intervalSeconds: TimeInterval { settings.intervalSeconds }
     public var syncClock: Bool { settings.syncClock }
     public var syncTimeZone: Bool { settings.syncTimeZone }
+    public var useGPSTime: Bool { settings.useGPSTime }
     public var backgroundResume: Bool { settings.backgroundResume }
 
     public func setDistanceMeters(_ meters: Double) {
@@ -320,6 +325,10 @@ public final class GeotagCoordinator {
 
     public func setSyncTimeZone(_ on: Bool) {
         var updated = settings; updated.syncTimeZone = on; updateSettings(updated)
+    }
+
+    public func setUseGPSTime(_ on: Bool) {
+        var updated = settings; updated.useGPSTime = on; updateSettings(updated)
     }
 
     public func setBackgroundResume(_ on: Bool) {

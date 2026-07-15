@@ -40,6 +40,16 @@ struct GeotagSettingsStoreTests {
         #expect(GeotagSettings.default.backgroundResume == true)
     }
 
+    @Test("Round-trips the useGPSTime flag (defaults off — device clock)")
+    func roundTripsUseGPSTime() {
+        #expect(GeotagSettings.default.useGPSTime == false)
+        let store = freshStore(suite: "alfa.test.settings.gpstime")
+        var settings = GeotagSettings.default
+        settings.useGPSTime = true
+        store.save(settings)
+        #expect(store.load().useGPSTime == true)
+    }
+
     @Test("Decodes older settings without backgroundResume, defaulting it and keeping other fields")
     func tolerantDecodeMissingKey() {
         let suite = "alfa.test.settings.legacy"
@@ -54,6 +64,7 @@ struct GeotagSettingsStoreTests {
         #expect(loaded.syncClock == false)
         #expect(loaded.syncTimeZone == true)
         #expect(loaded.backgroundResume == true) // absent key falls back to the (now on) default
+        #expect(loaded.useGPSTime == false) // ditto for keys added later still
     }
 
     @Test("One-time migration: a stale backgroundResume=false from the default-off era is reset to on")

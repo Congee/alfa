@@ -11,6 +11,9 @@ public struct GeotagSettings: Sendable, Equatable, Codable {
     public var syncClock: Bool
     /// Include the tz/dst block in the location packet (Time Area Correction).
     public var syncTimeZone: Bool
+    /// Source the CC13 clock write from the latest GNSS fix's timestamp instead of the device clock. Only a fresh
+    /// fix is used (a stale timestamp would set the camera slow); until one arrives the write is deferred.
+    public var useGPSTime: Bool
     /// Hold a standing `connect()` after a dropped link so iOS auto-reconnects the camera on its next power-on — even
     /// with the app in the background (state restoration relaunches Alfa to service it). A camera that goes silent
     /// when off ("Cnct. while Power OFF" = Off — the proven, Geotag-Alpha-parity configuration) makes the wait free by
@@ -25,12 +28,14 @@ public struct GeotagSettings: Sendable, Equatable, Codable {
         intervalSeconds: TimeInterval = 0,
         syncClock: Bool = true,
         syncTimeZone: Bool = true,
+        useGPSTime: Bool = false,
         backgroundResume: Bool = true
     ) {
         self.distanceMeters = distanceMeters
         self.intervalSeconds = intervalSeconds
         self.syncClock = syncClock
         self.syncTimeZone = syncTimeZone
+        self.useGPSTime = useGPSTime
         self.backgroundResume = backgroundResume
     }
 
@@ -44,6 +49,7 @@ public struct GeotagSettings: Sendable, Equatable, Codable {
             ?? defaults.intervalSeconds
         syncClock = try container.decodeIfPresent(Bool.self, forKey: .syncClock) ?? defaults.syncClock
         syncTimeZone = try container.decodeIfPresent(Bool.self, forKey: .syncTimeZone) ?? defaults.syncTimeZone
+        useGPSTime = try container.decodeIfPresent(Bool.self, forKey: .useGPSTime) ?? defaults.useGPSTime
         backgroundResume = try container.decodeIfPresent(Bool.self, forKey: .backgroundResume)
             ?? defaults.backgroundResume
     }

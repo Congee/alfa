@@ -31,12 +31,16 @@ struct SettingsView: View {
                 Section {
                     Toggle("Time Correction", isOn: clockBinding)
                     Toggle("Time Area Correction", isOn: timeZoneBinding)
+                    Toggle("Use GPS time", isOn: gpsTimeBinding)
+                        .disabled(!coordinator.syncClock)
                 } header: {
                     Text("Time sync · beta")
                 } footer: {
                     Text("Time Correction syncs the camera clock (via CC13, best-effort — bodies that don't support "
                         + "it ignore it). Time Area Correction sends your time zone with each location. Your camera's "
-                        + "own Auto Time Correction / Auto Area Adjust settings decide whether to apply them.")
+                        + "own Auto Time Correction / Auto Area Adjust settings decide whether to apply them. "
+                        + "Use GPS time sets the clock from the GNSS fix's time instead of this device's clock "
+                        + "(waits for a fresh fix).")
                 }
 
                 Section {
@@ -85,6 +89,10 @@ struct SettingsView: View {
 
     private var timeZoneBinding: Binding<Bool> {
         Binding(get: { coordinator.syncTimeZone }, set: { coordinator.setSyncTimeZone($0) })
+    }
+
+    private var gpsTimeBinding: Binding<Bool> {
+        Binding(get: { coordinator.useGPSTime }, set: { coordinator.setUseGPSTime($0) })
     }
 
     private var backgroundResumeBinding: Binding<Bool> {
