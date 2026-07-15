@@ -245,6 +245,10 @@ public actor CameraCentral {
             // Raw feeds with no policy meaning yet (DD01 location-enabled flag, the CC10 probe) — logged at the link.
             break
 
+        case .wroteRemoteCommand, .remoteCommandWriteFailed, .rssi:
+            // Phase 2 remote-control feedback — consumed by the remote-control engine (wired in a later slice).
+            break
+
         case let .failure(message):
             eventContinuation.yield(.failure(message))
         }

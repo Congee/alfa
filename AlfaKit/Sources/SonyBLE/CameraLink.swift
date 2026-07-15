@@ -16,6 +16,13 @@ enum LinkEvent: Sendable, Equatable {
     case connectFailed
     case disconnected
     case wroteLocation
+    /// An `FF01` remote-command write was acknowledged by the camera.
+    case wroteRemoteCommand
+    /// An `FF01` remote-command write was rejected or skipped — whatever button/sequence is in flight must abort
+    /// rather than believe a press the camera never saw.
+    case remoteCommandWriteFailed(String)
+    /// A `readRSSI()` answer for the live link (dBm) — feeds the remote UI's signal indicator.
+    case rssi(Int)
     /// Decoded `CC05` power/Wi-Fi state — the camera's proactive standby signal.
     case cameraPowerState(CameraPowerState)
     /// Decoded `FF02` remote status — the focus/shutter/record feed (Phase 1 consumes it listen-only;
@@ -60,13 +67,17 @@ final class CameraLink: NSObject, @unchecked Sendable {
     private var powerStateChar: CBCharacteristic? // CC05
     private var timeSyncChar: CBCharacteristic?   // CC13
 
-    // Remote Control service characteristic (nil until discovered / absent on some bodies). Listen-only in Phase 1:
-    // FF02 carries focus/shutter status (feeds "update location on focus"); FF01 remote *commands* are Phase 2 and
-    // are never written here.
-    private var remoteStatusChar: CBCharacteristic? // FF02
+    // Remote Control service characteristics (nil until discovered / absent on some bodies). FF02 carries the
+    // focus/shutter/record status feed (drives "update location on focus" and Phase 2's capture sequencing); FF01
+    // carries Phase 2's remote-command writes — gated on `handshakeComplete` exactly like location writes.
+    private var remoteStatusChar: CBCharacteristic?  // FF02
+    private var remoteCommandChar: CBCharacteristic? // FF01
     /// Time-sync bytes staged before `CC13` is known (or written the moment it is), so the write survives whichever
     /// order the location- and camera-control services finish discovery in.
     private var pendingTimeSync: [UInt8]?
+
+    /// Self-rescheduling RSSI poll for the remote UI (nil = off). Queue-confined like every other timer here.
+    private var rssiPoll: DispatchWorkItem?
 
     private var knownIdentifier: UUID?
     private var handshakeComplete = false
@@ -320,6 +331,38 @@ final class CameraLink: NSObject, @unchecked Sendable {
         }
     }
 
+    /// Writes an `FF01` remote-command byte pair (Phase 2). Gated exactly like `writeLocation`: never before the
+    /// ack-gated handshake completes — a standby/dormant link must never see writes (docs/05). A skipped write is
+    /// reported as a failure so the capture sequencer aborts instead of believing a press the camera never saw.
+    func writeRemoteCommand(_ bytes: [UInt8]) {
+        queue.async { [self] in
+            guard let peripheral, let remoteCommandChar, handshakeComplete else {
+                log.notice("remote command skipped — not ready (peripheral=\(self.peripheral != nil, privacy: .public) commandChar=\(self.remoteCommandChar != nil, privacy: .public) handshake=\(self.handshakeComplete, privacy: .public))")
+                onEvent(.remoteCommandWriteFailed("link not ready for remote commands"))
+                return
+            }
+            let hex = bytes.map { String(format: "%02X", $0) }.joined(separator: " ")
+            log.notice("remote command → camera (\(hex, privacy: .public))")
+            peripheral.writeValue(Data(bytes), for: remoteCommandChar, type: .withResponse)
+        }
+    }
+
+    /// Starts the foreground-only RSSI poll for the remote UI's signal indicator. Re-arming replaces any running
+    /// poll; the poll stops itself the moment the link is gone (and on `clearPeripheralState`).
+    func startRSSIPolling(interval: TimeInterval) {
+        queue.async { [self] in
+            rssiPoll?.cancel()
+            scheduleRSSIPoll(interval: interval)
+        }
+    }
+
+    func stopRSSIPolling() {
+        queue.async { [self] in
+            rssiPoll?.cancel()
+            rssiPoll = nil
+        }
+    }
+
     // MARK: - Helpers (all on `queue`)
 
     private func adoptAndConnect(_ peripheral: CBPeripheral) {
@@ -384,6 +427,18 @@ final class CameraLink: NSObject, @unchecked Sendable {
         pendingTimeSync = nil
     }
 
+    /// One RSSI read + re-arm. Self-terminates when the link is gone rather than polling a `nil` peripheral.
+    private func scheduleRSSIPoll(interval: TimeInterval) {
+        guard let peripheral, peripheral.state == .connected else {
+            rssiPoll = nil
+            return
+        }
+        peripheral.readRSSI()
+        let item = DispatchWorkItem { [self] in scheduleRSSIPoll(interval: interval) }
+        rssiPoll = item
+        queue.asyncAfter(deadline: .now() + interval, execute: item)
+    }
+
     private func clearPeripheralState() {
         peripheral = nil
         writeChar = nil
@@ -393,7 +448,10 @@ final class CameraLink: NSObject, @unchecked Sendable {
         powerStateChar = nil
         timeSyncChar = nil
         remoteStatusChar = nil
+        remoteCommandChar = nil
         pendingTimeSync = nil
+        rssiPoll?.cancel()
+        rssiPoll = nil
         handshakeComplete = false
         bondRetries = 0
         powerNotifyRetries = 0
@@ -689,6 +747,7 @@ extension CameraLink: CBPeripheralDelegate {
         powerStateChar = nil
         timeSyncChar = nil
         remoteStatusChar = nil
+        remoteCommandChar = nil
         handshakeComplete = false
         peripheral.discoverServices([SonyCBUUID.locationService, SonyCBUUID.cameraControlService, SonyCBUUID.remoteControlService])
         scheduleDiscoveryStallTimeout()
@@ -727,8 +786,9 @@ extension CameraLink: CBPeripheralDelegate {
                 #endif
                 peripheral.discoverCharacteristics(controlCharacteristics, for: service)
             case SonyCBUUID.remoteControlService:
-                // FF02 only — the status feed for "update location on focus". FF01 (commands) is Phase 2.
-                peripheral.discoverCharacteristics([SonyCBUUID.remoteStatus], for: service)
+                // FF02 = the status feed (update-on-focus + capture sequencing); FF01 = Phase 2's remote commands,
+                // written only through `writeRemoteCommand`'s handshake gate.
+                peripheral.discoverCharacteristics([SonyCBUUID.remoteStatus, SonyCBUUID.remoteCommand], for: service)
             default:
                 break
             }
@@ -800,12 +860,20 @@ extension CameraLink: CBPeripheralDelegate {
             }
             #endif
         case SonyCBUUID.remoteControlService:
-            for characteristic in characteristics where characteristic.uuid == SonyCBUUID.remoteStatus {
-                // Focus/shutter status feed. Subscribing is listen-only and safe whatever the camera's Bluetooth
-                // remote-control setting: when it's off the camera stays silent or reports `02 C3 00` (docs/03) —
-                // absence of the whole service is equally fine, geotagging works without it.
-                remoteStatusChar = characteristic
-                peripheral.setNotifyValue(true, for: characteristic)
+            for characteristic in characteristics {
+                switch characteristic.uuid {
+                case SonyCBUUID.remoteStatus:
+                    // Focus/shutter status feed. Subscribing is listen-only and safe whatever the camera's Bluetooth
+                    // remote-control setting: when it's off the camera stays silent or reports `02 C3 00` (docs/03) —
+                    // absence of the whole service is equally fine, geotagging works without it.
+                    remoteStatusChar = characteristic
+                    peripheral.setNotifyValue(true, for: characteristic)
+                case SonyCBUUID.remoteCommand:
+                    // Write-only command endpoint — no subscription; writes flow through `writeRemoteCommand`.
+                    remoteCommandChar = characteristic
+                default:
+                    break
+                }
             }
         default:
             break
@@ -813,6 +881,17 @@ extension CameraLink: CBPeripheralDelegate {
     }
 
     func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
+        // FF01 remote commands have their own ack/abort channel: they can only ever be written post-handshake
+        // (the write gate), so they never participate in the handshake-failure/standby logic below.
+        if characteristic.uuid == SonyCBUUID.remoteCommand {
+            if let error {
+                log.notice("remote command write FAILED: \(error.localizedDescription, privacy: .public)")
+                onEvent(.remoteCommandWriteFailed(error.localizedDescription))
+            } else {
+                onEvent(.wroteRemoteCommand)
+            }
+            return
+        }
         if let error {
             log.notice("write FAILED on \(characteristic.uuid.uuidString, privacy: .public): \(error.localizedDescription, privacy: .public)")
             if !handshakeComplete {
@@ -879,6 +958,12 @@ extension CameraLink: CBPeripheralDelegate {
         default:
             onEvent(.notify(characteristic: characteristic.uuid.uuidString, value: bytes))
         }
+    }
+
+    func peripheral(_ peripheral: CBPeripheral, didReadRSSI RSSI: NSNumber, error: Error?) {
+        // Best-effort: a failed read just leaves the signal indicator stale until the next poll tick.
+        guard error == nil else { return }
+        onEvent(.rssi(RSSI.intValue))
     }
 
     func peripheral(
