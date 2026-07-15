@@ -35,17 +35,23 @@ The core of the project. Deliver GPS + time sync **and** the "good BLE citizen" 
       `CBCentralManager` created with a restore identifier; an `AppDelegate` (`didFinishLaunchingWithOptions`)
       re-creates the central on launch so iOS delivers `willRestoreState` on a background relaunch. The restored link
       is resumed **only if it survived** (re-discover services → re-subscribe → re-run handshake → continue); a
-      restored-but-dropped/pending link is **not** blindly reconnected — the pending `connect()` "wake magnet" is
-      cancelled and the policy backs off (anti-churn, `docs/05` rule 1). The enabled/disabled state is persisted so a
+      restored **still-pending** standing connect is **kept in place** while background resume is on (cancelling it
+      races the camera's power-on — the camera's next lever-on completes it), and cancelled + backed off when
+      background resume is off; a restored-but-**dropped** link re-arms the standing connect rather than blindly
+      re-issuing one (anti-churn, `docs/05` rule 1). The enabled/disabled state is persisted so a
       relaunch resumes non-interactively (no permission prompts). *Mechanics validated on-device per
       `08-integration-testing.md`.*
-- [x] Keep-alive + foreground reconnect: a ~10 s keep-alive re-pushes the last position while connected so the camera
+- [x] Keep-alive + reconnect: a 45 s keep-alive (single source of truth `ConnectionPolicy.keepAliveSeconds`, safely
+      below the camera's ~60 s fix-expiry tolerance) re-pushes the last position while connected so the camera
       never expires its fix (`docs/05`; the camera signals expiry over no BLE characteristic, so it is prevented via a
       write-timeline-driven timer that adds no redundant writes while moving); and a genuinely dropped link is
       re-established automatically **in the foreground *and* background** (standing `connect()` serviced on the
       camera's next power-on, relaunching via state restoration if suspended). A CC05 standby bail never re-arms (no
-      wake-magnet loop). *The connect/handshake/push and CC05-standby-bail paths are covered by a two-radio on-device
-      integration harness (`Tools/ble-integration/`: mock camera on the Mac, real central on the device under
+      wake-magnet loop). A camera that answers the connect **without serving the Sony GATT** — connectable-while-off,
+      or inside its power-on **boot window** before the GATT exists — is held in a **dormant standby** (no writes,
+      60 s probe, 15 s discovery-stall watchdog), recovering to ready via the bonded **Service Changed** indication
+      and the ack-gated handshake. *The connect/handshake/push and CC05-standby-bail paths are covered by a two-radio
+      on-device integration harness (`Tools/ble-integration/`: mock camera on the Mac, real central on the device under
       `xcodebuild test`) — both PASS. Power-cycle reconnect (a link-drop a macOS peripheral can't emulate) and fix-expiry
       stay covered by the pure-reducer host tests + on-device logs (`08` IT-11/IT-12).*
 - [x] SwiftUI UI: tab shell (Home / Settings / Help); pairing + permissions onboarding flow (Bluetooth →
@@ -57,8 +63,11 @@ The core of the project. Deliver GPS + time sync **and** the "good BLE citizen" 
       compatibility. *(feature parity with Geotag Alpha's Phase-1 geotag surface; multi-camera + update-on-focus
       remain deferred — see D3/OQ4 and Phase 2.)*
 - [~] On-device validation on A7R V fw 4.0 (`08-integration-testing.md`): **IT-2 pair ✅**, **IT-4 CC13 clock ✅
-      verified** (local-wall-clock interpretation correct — no UTC flip needed). *Remaining: the standby-drain
-      success criterion (IT-10, Rig B/iPhone), IT-5 CC05 standby, IT-7 state restoration, IT-4 tz sub-test.*
+      verified** (local-wall-clock interpretation correct — no UTC flip needed), **IT-12b background power-cycle
+      reconnect ✅ field-verified (2026-07-15)** — lever off → on with the app backgrounded re-links and resumes
+      geotagging with no user action. *Remaining: the standby-drain success criterion (IT-10, Rig B/iPhone — now
+      unblocked, the iPhone is paired), IT-12a foreground run, IT-5 CC05 standby, IT-7 state restoration, IT-4 tz
+      sub-test, and a multi-hour background keep-alive soak.*
 
 ## Phase 2 — Remote control (foreground)
 

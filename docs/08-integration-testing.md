@@ -16,7 +16,8 @@ Run each suite in order; later suites assume a bonded camera from IT-2.
 | **A — now** | iPad mini 6 (iPad14,1, **Wi-Fi-only → coarse location, no GNSS**) + A7R V (fw 4.0) | Everything below **except** the two GPS/battery items: pairing, geotag writes are *accepted*, time/tz sync, CC05 standby, anti-churn, **state restoration**, forget/re-pair | GPS **accuracy** (location is coarse Wi-Fi); multi-hour battery-drain truth |
 | **B — later** | iPhone 17 Pro "Monad" (has GNSS) + A7R V | GPS accuracy (IT-9); the north-star **battery-drain field test** (IT-10) | — |
 
-> The iPhone is **not connected right now**; IT-9 and IT-10 are deferred to Rig B. Everything else runs on Rig A today.
+> Rig B's iPhone ("Monad") is paired to the Mac as of 2026-07-15 — IT-9 and IT-10 are unblocked hardware-wise and are
+> the next validations owed. Everything else runs on Rig A.
 
 Bluetooth here means BLE to the **camera**; the iPad's coarse location still produces valid `LocationFix`es, so the
 camera will receive and accept `DD11` writes and show a location tag — enough to prove the write path end to end. Only
@@ -30,11 +31,16 @@ system-triggered *background* relaunch — where no debugger can attach — is s
 **Stream (primary):** Console.app → select the device in the sidebar → search field: `subsystem:me.congee.alfa`.
 Keep it open across backgrounding and relaunch.
 
-**Capture (CLI):**
+**Capture (CLI):** `Tools/alfa-logs.sh [minutes]` collects the last N minutes from the connected device and prints
+the filtered markers (auto-detects the device; keeps the archive in `$TMPDIR` for re-querying). Equivalent raw
+commands:
 ```
-log collect --device-udid 0A2AEAB0-7204-590E-940B-64C04B1D9F25 --last 10m --output alfa.logarchive
-log show alfa.logarchive --predicate 'subsystem == "me.congee.alfa"' --info
+sudo log collect --device-udid 00008110-00043032360A801E --last 10m --output alfa.logarchive
+log show alfa.logarchive --predicate 'subsystem == "me.congee.alfa"' --info --style compact
 ```
+> ⚠️ `log collect --device-udid` takes the **hardware** UDID (`00xxxxxx-…`, from `xcrun xctrace list devices`) —
+> **not** the CoreDevice UUID that `devicectl` uses below (that fails with "unable to obtain a connection"). It also
+> needs `sudo`.
 
 **Install / launch:**
 ```
@@ -280,19 +286,32 @@ lever off → on. **Expect:** the standing connect is **kept** across background
 re-links — relaunching the app via state restoration if it was suspended (`resuming geotag after relaunch …` →
 `restore: link survived …` or a fresh `connected …`). Geotagging resumes with the app still in the background.
 
+> **Boot-window note (the 2026-07-14 field failure):** iOS may service the standing connect within ~1 s of lever-on,
+> **before** the camera's Sony GATT exists — discovery then returns a reduced GATT and the log shows
+> `connected — discovering services` → `no location service in GATT … holding link in standby`. Recovery is the
+> bonded **Service Changed** indication once the full GATT is restored: `services modified … — re-discovering` →
+> `ready — services + handshake complete` (backstopped by the 15 s discovery-stall watchdog and the 60 s standby
+> probe). Eternal silence after `connected — discovering services` is the pre-fix zombie fingerprint — it must not
+> appear.
+
 **Pass:** power-cycle auto-recovers with no user action, foreground and background.
+**Status:** IT-12b ✅ pass (2026-07-15): app backgrounded, lever off → on, BLE re-linked and geotagging resumed
+without user action (user-confirmed, `Cnct. while Power OFF: Off`). IT-12a foreground still owed a dedicated run.
 
 > ⚠️ **Ordering known, but it exposes a drain (on-device 2026-07-14, `subsystem:me.congee.alfa`).** A real A7R V
 > lever-off produces a **plain** `disconnected: The specified device has disconnected from us.` with **no** preceding
 > `CC05` back-off line (contrast the standby-bail fingerprint `backing off — cancelling pending connect intent` →
 > `disconnected: clean`, which appears only on a CC05 `off`). So the A7R V does *not* emit CC05-off on a lever-off — the
 > `.connected`→drop path fires and the link auto-reconnects ~9 s later (verified, incl. through a state-restoration
-> relaunch). **The problem:** with no CC05-off, the standby **bail never fires either**, so Alfa re-links to and *holds*
-> a lever-off "Cnct while Power OFF" camera, keeping it awake (user-observed: access lamp stays on = drain — the exact
-> thing Alfa exists to prevent). **Open action:** the reconnect-vs-back-off decision cannot rely on CC05 for this body;
-> it needs another discriminator — most likely the Sony **advertisement power/status byte**, so a bounded scan
-> reconnects only to a genuinely-powered-on camera and ignores an off-but-connectable one. Capture the lever-off log
-> and the advertisement bytes to design this (`docs/03` advertisement parsing).
+> relaunch). **The problem:** with no CC05-off, the standby **bail never fires either**, so Alfa re-links to a
+> lever-off "Cnct while Power OFF" camera. **Addressed (2026-07-15, `a5ac612`):** a re-link to a camera that isn't
+> serving/accepting the Sony GATT now converges to a **dormant `.standby` hold** — no writes, a 60 s probe, ack-gated
+> `.ready` — so Alfa adds no traffic of its own to the held link. Whether the *held link alone* still keeps the body
+> awake (the access lamp was observed staying on under the old, actively-held link; the dormant hold is unmeasured)
+> is exactly what IT-10 condition (b) answers. If it drains, the fallback design is the Sony **advertisement
+> power/status byte** as a pre-connect discriminator (bounded scan reconnects only to a genuinely-powered-on camera —
+> `docs/03` advertisement parsing). The proven, recommended configuration sidesteps all of this: **Cnct. while Power
+> OFF: Off**, where a lever-off camera goes BLE-silent and the wait costs nothing by construction.
 
 ## Automated integration harness (mock camera peripheral)
 
@@ -353,7 +372,7 @@ Alfa regression). Document the procedure so it can be repeated after any connect
 | IT-6 | Anti-churn | A | yes | |
 | IT-7 | State restoration | A | yes (7a); 7b opportunistic | |
 | IT-11 | Staleness timeout + keep-alive | A | yes (idle-drop bug) | |
-| IT-12 | Power-cycle reconnect (fg + bg) | A | yes (reconnect bug) | |
+| IT-12 | Power-cycle reconnect (fg + bg) | A | yes (reconnect bug) | ✅ 12b bg pass (2026-07-15); 12a fg pending |
 | IT-8 | Forget / re-pair | A | yes | |
 | IT-9 | GPS accuracy | B | yes (before GPS claims) | |
 | IT-10 | Battery-drain field test | B | **yes — the reason the project exists** | |
