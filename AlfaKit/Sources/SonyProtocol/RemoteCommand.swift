@@ -26,6 +26,22 @@ public enum SonyRemoteCommand {
     public static let c1 = Button(press: [0x01, 0x21], release: [0x01, 0x20])
     /// Video record (toggle). Some bodies act on the release (`01 0E`) alone.
     public static let record = Button(press: [0x01, 0x0F], release: [0x01, 0x0E])
+
+    #if DEBUG
+    /// The DISPUTED zoom / manual-focus candidate opcodes (docs/03 🔴): 3-byte writes `[0x02, opcode, step]` with
+    /// opcode groups `44/45/46/47` and `6A/6B/6C/6D`, step `0x10` or `0x20` — sources disagree on which group is
+    /// zoom vs focus and on the step byte. Debug-probe data ONLY: fired raw at the real camera to observe what
+    /// actually moves; nothing is modeled as a real command until the user verifies it live. Compiled out of
+    /// Release so a disputed byte can never ship as a silent oracle.
+    public enum ProbeGroup: UInt8, CaseIterable, Sendable {
+        case g44 = 0x44, g45 = 0x45, g46 = 0x46, g47 = 0x47
+        case g6A = 0x6A, g6B = 0x6B, g6C = 0x6C, g6D = 0x6D
+    }
+
+    public static func probeBytes(group: ProbeGroup, step: UInt8) -> [UInt8] {
+        [0x02, group.rawValue, step]
+    }
+    #endif
 }
 
 /// Camera status decoded from a `FF02` notification (🟡 medium confidence; see `docs/03-ble-protocol.md`).

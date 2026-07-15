@@ -49,8 +49,27 @@ struct RemoteView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(CameraBody.surface)
         .environment(\.colorScheme, .dark) // the camera body is black in any system theme
-        .disabled(false) // individual controls gate themselves so the banner/hints stay interactive
+        #if DEBUG
+        .overlay(alignment: .topTrailing) {
+            Button {
+                showProbePanel = true
+            } label: {
+                Image(systemName: "testtube.2")
+                    .font(.footnote)
+                    .foregroundStyle(CameraBody.label)
+                    .padding(12)
+            }
+            .accessibilityLabel("Zoom and focus opcode probe")
+        }
+        .sheet(isPresented: $showProbePanel) {
+            ProbePanel(remote: remote)
+        }
+        #endif
     }
+
+    #if DEBUG
+    @State private var showProbePanel = false
+    #endif
 
     private var controlsEnabled: Bool {
         remote.activity != .disconnected && remote.remoteFeatureActive
@@ -415,6 +434,51 @@ private struct HoldButtonView: View {
 
     private var active: Bool { phase != .idle }
 }
+
+#if DEBUG
+// MARK: - Zoom/MF opcode probe panel (docs/03 🔴 — disputed byte groups, fired live at the real camera)
+
+private struct ProbePanel: View {
+    let remote: RemoteCoordinator
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    ForEach(Array(remote.probeCandidates.enumerated()), id: \.offset) { index, label in
+                        Button {
+                            remote.fireProbe(at: index)
+                        } label: {
+                            HStack {
+                                Text(label).font(.system(.body, design: .monospaced))
+                                Spacer()
+                                Image(systemName: "paperplane")
+                            }
+                        }
+                    }
+                } header: {
+                    Text("Fire a candidate")
+                } footer: {
+                    Text("Sources disagree which byte group is zoom vs manual focus. Fire one with a power-zoom "
+                        + "or AF lens mounted and watch what moves; write acks and any FF02 replies land in the "
+                        + "device log. Nothing ships as a real control until verified here.")
+                }
+                if !remote.probeHistory.isEmpty {
+                    Section("Fired this session") {
+                        ForEach(Array(remote.probeHistory.enumerated()), id: \.offset) { _, entry in
+                            Text(entry).font(.system(.footnote, design: .monospaced))
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Opcode probe")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+        }
+    }
+}
+#endif
 
 // MARK: - Record
 

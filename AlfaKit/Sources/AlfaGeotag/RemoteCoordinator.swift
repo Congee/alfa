@@ -1,5 +1,6 @@
 import Foundation
 import SonyBLE
+import SonyProtocol
 
 /// The remote-control façade (Phase 2): mirrors ``SonyBLE/RemoteControlState`` into UI primitives and translates
 /// gestures into `CameraCentral` calls — the same discipline as ``GeotagCoordinator``: the App layer never names a
@@ -120,6 +121,31 @@ public final class RemoteCoordinator {
         if !visible { signalBars = nil } // stale bars are worse than none
         Task { await central.setRemoteUIVisible(visible) }
     }
+
+    #if DEBUG
+    // MARK: - Zoom/MF opcode probe (docs/03 🔴 — disputed groups; debug builds only)
+
+    /// Labels for the disputed zoom/MF candidates (group × step), e.g. `"02 44 10"` — indices pair with
+    /// ``fireProbe(at:)``. Results are read from the device log (`subsystem:me.congee.alfa`), like the CC10 probe.
+    public let probeCandidates: [String] = probeMatrix.map { bytes in
+        bytes.map { String(format: "%02X", $0) }.joined(separator: " ")
+    }
+    /// Labels of probes fired this session, newest first — the panel's local history.
+    public private(set) var probeHistory: [String] = []
+
+    private static let probeMatrix: [[UInt8]] = SonyRemoteCommand.ProbeGroup.allCases.flatMap { group in
+        [UInt8(0x10), UInt8(0x20)].map { SonyRemoteCommand.probeBytes(group: group, step: $0) }
+    }
+
+    /// Fires one disputed candidate at the camera through the same gated FF01 path real buttons use (bypassing the
+    /// capture engine — a probe is not a modeled button). Watch the lens/body for what actually moves.
+    public func fireProbe(at index: Int) {
+        guard Self.probeMatrix.indices.contains(index) else { return }
+        let bytes = Self.probeMatrix[index]
+        probeHistory.insert(probeCandidates[index], at: 0)
+        Task { await central.sendProbeCommand(bytes) }
+    }
+    #endif
 
     // MARK: - Event intake (from GeotagCoordinator's single consumption loop)
 
