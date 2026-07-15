@@ -33,6 +33,7 @@ public enum SonyGATT {
         // Camera Control service (8000CC00)
         public static let cameraPowerState = "CC05" // power/Wi-Fi state
         public static let cameraTimeSync = "CC13"   // time-sync packet (some bodies)
+        public static let cameraBatteryInfo = "CC10" // battery info — UNVERIFIED doc-only lead (docs/03); probe only
 
         // Pairing service (8000EE00)
         public static let pairingCommand = "EE01"

@@ -145,8 +145,11 @@ drives the Balanced battery policy.
 standard Battery Service `0x180F`/`0x2A19` appears nowhere across the ecosystem, and the sole lead is `CC10`
 ("Battery Information", Read+Notify, with a detailed byte layout) documented **only** in CameraSync's docs folder,
 backed by zero code there and absent from the primary RE blogs it cites — treat as unverified and possibly
-synthesized. Sony's own apps likely read battery over the Wi-Fi/PTP-IP handoff instead. If pursued: probe `CC10` on
-the real A7R V and log raw bytes before building anything on it.
+synthesized. Sony's own apps likely read battery over the Wi-Fi/PTP-IP handoff instead. **Probe armed (2026-07-15,
+debug builds only):** every connect discovers `CC10` alongside `CC05`/`CC13` and, if present, subscribes + reads it,
+logging presence/absence, properties, raw bytes, and read errors (`subsystem:me.congee.alfa`, lines prefixed
+`CC10 battery probe:`). The next real-A7R V connect settles the question (`docs/08` IT-14); nothing is built on it
+until it returns plausible data.
 
 **`CC13` — implemented and ✅ verified on the A7R V (fw 4.0).** `SonyTimePacket` (`SonyProtocol/TimePacket.swift`)
 encodes this layout and the BLE layer writes it best-effort on connect when the "Time Correction" setting is on and

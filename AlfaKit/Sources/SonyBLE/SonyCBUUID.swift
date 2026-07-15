@@ -22,4 +22,5 @@ public enum SonyCBUUID {
 
     public static var cameraPowerState: CBUUID { CBUUID(string: SonyGATT.Characteristic.cameraPowerState) }
     public static var cameraTimeSync: CBUUID { CBUUID(string: SonyGATT.Characteristic.cameraTimeSync) }
+    public static var cameraBatteryInfo: CBUUID { CBUUID(string: SonyGATT.Characteristic.cameraBatteryInfo) }
 }

@@ -371,6 +371,18 @@ events arrive (or `02 C3 00`), and geotagging is unaffected.
 *(The FF02 → push mechanics for both triggers are also covered on every harness run by the `focus` scenario below;
 this test pinned the real body's behavior and the camera-side setting.)*
 
+## IT-14 — CC10 battery probe *(real camera, passive — no steps beyond connecting)*
+
+Settles whether the doc-only `CC10` "Battery Information" lead exists on the A7R V (`docs/03` — zero working code
+behind it anywhere; possibly synthesized). Debug builds probe it automatically on **every** connect: discover, and if
+present subscribe + read, logging everything under `CC10 battery probe:` (`subsystem:me.congee.alfa`).
+**Steps:** none — just connect to the real camera as usual, then pull the log (`Tools/alfa-logs.sh`).
+**Read:** `absent from Camera Control service` ⇒ the lead is dead on this body — close the battery-display question
+for good. `present, properties 0x…` + `notify CC10 = …` hex ⇒ record the raw bytes here and only then consider
+decoding/UI. `read FAILED — …` ⇒ note the exact ATT error (auth-required would hint it exists behind a deeper bond).
+*(Verified against the sim 2026-07-15: all three harness scenarios log the `absent` branch — the probe mechanics
+work; the real body's answer is what's owed.)*
+
 ## IT-9 — GPS accuracy *(Rig B — iPhone)*
 
 On the iPhone (GNSS), verify pushed coordinates match ground truth (spot-check a frame's embedded GPS against a known

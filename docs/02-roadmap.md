@@ -75,7 +75,8 @@ The core of the project. Deliver GPS + time sync **and** the "good BLE citizen" 
       Home.
       **Map view** — Home shows the last position actually acknowledged by the camera (the ack event now carries the
       fix; coordinator exposes it as a plain coordinate) on a MapKit map, cleared on forget. *Camera battery display
-      investigated and parked: no verified BLE path exists (docs/03).*
+      investigated and parked: no verified BLE path exists (docs/03); a debug-only `CC10` probe is armed on every
+      connect — the next real-camera session answers it (`docs/08` IT-14).*
 - [~] On-device validation on A7R V fw 4.0 (`08-integration-testing.md`): **IT-2 pair ✅**, **IT-4 CC13 clock ✅
       verified** (local-wall-clock interpretation correct — no UTC flip needed), **IT-12b background power-cycle
       reconnect ✅ field-verified (2026-07-15)** — lever off → on with the app backgrounded re-links and resumes
@@ -110,7 +111,8 @@ Mirror Alpha Remote Controller's core over the Remote Control service (`8000FF00
 ## Phase 5 — Polish & release
 
 - [ ] Multi-camera UX.
-- [ ] Localization.
+- [ ] Localization. *(Geotag Alpha shipped German/French/Japanese in its v1.7 — a release-polish parity item, not
+      part of the Phase-1 geotag feature surface.)*
 - [ ] Finalize name (OQ1), copyright holder, GitHub release, screenshots, docs site.
 
 ## Optional research side-track (not on the critical path)

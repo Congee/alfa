@@ -706,10 +706,14 @@ extension CameraLink: CBPeripheralDelegate {
                     for: service
                 )
             case SonyCBUUID.cameraControlService:
-                peripheral.discoverCharacteristics(
-                    [SonyCBUUID.cameraPowerState, SonyCBUUID.cameraTimeSync],
-                    for: service
-                )
+                var controlCharacteristics = [SonyCBUUID.cameraPowerState, SonyCBUUID.cameraTimeSync]
+                #if DEBUG
+                // Battery probe (docs/03): CC10 "Battery Information" is a doc-only lead with zero working code
+                // behind it anywhere in the OSS ecosystem. Debug builds probe it (read + log raw bytes) so a real
+                // connect settles whether the path exists; nothing is built on it until it returns plausible data.
+                controlCharacteristics.append(SonyCBUUID.cameraBatteryInfo)
+                #endif
+                peripheral.discoverCharacteristics(controlCharacteristics, for: service)
             case SonyCBUUID.remoteControlService:
                 // FF02 only — the status feed for "update location on focus". FF01 (commands) is Phase 2.
                 peripheral.discoverCharacteristics([SonyCBUUID.remoteStatus], for: service)
@@ -764,10 +768,25 @@ extension CameraLink: CBPeripheralDelegate {
                     // Best-effort clock sync (beta): flush any staged time packet now that CC13 is known.
                     timeSyncChar = characteristic
                     flushTimeSync()
+                #if DEBUG
+                case SonyCBUUID.cameraBatteryInfo:
+                    // Battery probe: read + subscribe and let the generic didUpdateValueFor hex log capture whatever
+                    // comes back. Purely observational — no state is kept and nothing downstream consumes it.
+                    log.notice("CC10 battery probe: present, properties 0x\(String(characteristic.properties.rawValue, radix: 16), privacy: .public) — reading")
+                    if characteristic.properties.contains(.notify) { peripheral.setNotifyValue(true, for: characteristic) }
+                    if characteristic.properties.contains(.read) { peripheral.readValue(for: characteristic) }
+                #endif
                 default:
                     break
                 }
             }
+            #if DEBUG
+            if !characteristics.contains(where: { $0.uuid == SonyCBUUID.cameraBatteryInfo }) {
+                // The probe's negative result matters as much as a hit: absence on the real body closes the
+                // battery-display question for good (docs/03).
+                log.notice("CC10 battery probe: absent from Camera Control service")
+            }
+            #endif
         case SonyCBUUID.remoteControlService:
             for characteristic in characteristics where characteristic.uuid == SonyCBUUID.remoteStatus {
                 // Focus/shutter status feed. Subscribing is listen-only and safe whatever the camera's Bluetooth
@@ -818,6 +837,14 @@ extension CameraLink: CBPeripheralDelegate {
     }
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
+        #if DEBUG
+        if characteristic.uuid == SonyCBUUID.cameraBatteryInfo, let error {
+            // The probe's error result is diagnostic (e.g. "read not permitted" vs an auth error) — the generic
+            // guard below would swallow it silently.
+            log.notice("CC10 battery probe: read FAILED — \(error.localizedDescription, privacy: .public)")
+            return
+        }
+        #endif
         guard error == nil, let value = characteristic.value else { return }
         let bytes = [UInt8](value)
         // Log the raw notify/read value at the lifecycle seam so the camera's actual CC05 power-state behaviour is
