@@ -377,11 +377,16 @@ Settles whether the doc-only `CC10` "Battery Information" lead exists on the A7R
 behind it anywhere; possibly synthesized). Debug builds probe it automatically on **every** connect: discover, and if
 present subscribe + read, logging everything under `CC10 battery probe:` (`subsystem:me.congee.alfa`).
 **Steps:** none — just connect to the real camera as usual, then pull the log (`Tools/alfa-logs.sh`).
-**Read:** `absent from Camera Control service` ⇒ the lead is dead on this body — close the battery-display question
-for good. `present, properties 0x…` + `notify CC10 = …` hex ⇒ record the raw bytes here and only then consider
-decoding/UI. `read FAILED — …` ⇒ note the exact ATT error (auth-required would hint it exists behind a deeper bond).
-*(Verified against the sim 2026-07-15: all three harness scenarios log the `absent` branch — the probe mechanics
-work; the real body's answer is what's owed.)*
+
+**✅ Part 1 answered 2026-07-15 — `CC10` EXISTS on the A7R V fw 4.0.** The camera came on near the iPad and the
+probe hit it three times: `present, properties 0x12` (Read + Notify), payload stable across all three reads:
+`12 00 00 02 03 00 01 00 0A 00 00 00 00 64 00 00 00 00 02` (19 B). Byte 13 = `0x64` = 100, with the camera fully
+charged — battery % is the working hypothesis (docs/03).
+
+**Part 2 owed — pin the decode:** re-read at a visibly different charge level (e.g. ~60 %, ~20 %) and compare
+byte 13 against the camera's own battery display; note whether a *notify* arrives when the level drops while
+connected; if convenient, once with a charger attached. Only after byte 13 tracks the display does a battery UI
+(GA-parity item) get built.
 
 ## IT-9 — GPS accuracy *(Rig B — iPhone)*
 

@@ -141,15 +141,22 @@ errors return GATT status `0x0185`. 🟡
 Not required for Phase 1's core, but `CC05` power-state observation is useful for the "camera is on/off" signal that
 drives the Balanced battery policy.
 
-**Camera battery over BLE: 🔴 effectively unknown (surveyed 2026-07-15).** No working OSS project reads it — the
-standard Battery Service `0x180F`/`0x2A19` appears nowhere across the ecosystem, and the sole lead is `CC10`
-("Battery Information", Read+Notify, with a detailed byte layout) documented **only** in CameraSync's docs folder,
-backed by zero code there and absent from the primary RE blogs it cites — treat as unverified and possibly
-synthesized. Sony's own apps likely read battery over the Wi-Fi/PTP-IP handoff instead. **Probe armed (2026-07-15,
-debug builds only):** every connect discovers `CC10` alongside `CC05`/`CC13` and, if present, subscribes + reads it,
-logging presence/absence, properties, raw bytes, and read errors (`subsystem:me.congee.alfa`, lines prefixed
-`CC10 battery probe:`). The next real-A7R V connect settles the question (`docs/08` IT-14); nothing is built on it
-until it returns plausible data.
+**Camera battery over BLE: `CC10` ✅ EXISTS on the A7R V — first-party observed (2026-07-15), decode 🟡 pending.**
+Background: no working OSS project reads battery — the standard Battery Service `0x180F`/`0x2A19` appears nowhere
+across the ecosystem, and `CC10` ("Battery Information", Read+Notify, with a detailed byte layout) was documented
+**only** in CameraSync's docs folder, backed by zero code. The debug-build probe (discover + subscribe + read on
+every connect, lines `CC10 battery probe:`) hit the real body the first time the camera came on near the iPad:
+**`CC10` is present with properties `0x12` (Read + Notify)** and returned a stable 19-byte payload across three
+consecutive connects:
+
+```
+12 00 00 02 03 00 01 00 0A 00 00 00 00 64 00 00 00 00 02
+```
+
+Byte 13 is `0x64` = **100** — almost certainly the battery percentage (the camera was fully charged). 🟡 The decode
+is unconfirmed until the payload is re-read at other charge levels (and ideally while charging / on the vertical
+grip's second battery) — see `docs/08` IT-14. Build no UI beyond a DEBUG surface until byte 13 (and whether the
+notify fires on level changes) is pinned.
 
 **`CC13` — implemented and ✅ verified on the A7R V (fw 4.0).** `SonyTimePacket` (`SonyProtocol/TimePacket.swift`)
 encodes this layout and the BLE layer writes it best-effort on connect when the "Time Correction" setting is on and
