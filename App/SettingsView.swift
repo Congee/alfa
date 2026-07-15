@@ -23,7 +23,7 @@ struct SettingsView: View {
                     }
                     Toggle("Update on focus", isOn: focusBinding)
                 } header: {
-                    Text("Updates")
+                    Text("Updates").silkscreen()
                 } footer: {
                     Text("Location is sent only after you move at least this far, and no more often than the "
                         + "interval. Larger values save battery. Update on focus additionally pushes the freshest "
@@ -38,7 +38,7 @@ struct SettingsView: View {
                     Toggle("Use GPS time", isOn: gpsTimeBinding)
                         .disabled(!coordinator.syncClock)
                 } header: {
-                    Text("Time sync · beta")
+                    Text("Time sync · beta").silkscreen()
                 } footer: {
                     Text("Time Correction syncs the camera clock (via CC13, best-effort — bodies that don't support "
                         + "it ignore it). Time Area Correction sends your time zone with each location. Your camera's "
@@ -50,7 +50,7 @@ struct SettingsView: View {
                 Section {
                     Toggle("Reconnect in background", isOn: backgroundResumeBinding)
                 } header: {
-                    Text("Background")
+                    Text("Background").silkscreen()
                 } footer: {
                     Text("When your camera powers back on, Alfa reconnects and resumes geotagging on its own — even with "
                         + "the app in the background. While the camera is off, Alfa never writes to it: with "
@@ -64,7 +64,7 @@ struct SettingsView: View {
                 Section {
                     Toggle("Freeze location pushes", isOn: freezeBinding)
                 } header: {
-                    Text("Diagnostics")
+                    Text("Diagnostics").silkscreen()
                 } footer: {
                     Text("Debug only. Stops sending location to the camera (real pushes and keep-alives) while still "
                         + "receiving fixes — used to measure how long the camera keeps a fix before it shows "

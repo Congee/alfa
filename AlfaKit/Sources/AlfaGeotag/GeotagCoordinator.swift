@@ -270,6 +270,33 @@ public final class GeotagCoordinator {
         }
     }
 
+    /// The Home status plate's state word — the Remote banner's tracked-capitals voice applied to the geotag
+    /// lifecycle, so every surface speaks the same "camera language". ``statusTone`` picks its color.
+    public var statusWord: String {
+        guard isEnabled else { return "OFF" }
+        return switch connection {
+        case .idle: "IDLE"
+        case .scanning, .connecting: "SEARCHING"
+        case .connected: "GEOTAGGING"
+        case .standby, .backedOff: "STANDBY"
+        case .unavailable: "BLUETOOTH OFF"
+        }
+    }
+
+    /// Coarse color grade for ``statusWord`` (the app layer maps tones to its palette; no SonyBLE type leaks).
+    public enum StatusTone: Sendable { case off, active, busy, standby, attention }
+
+    public var statusTone: StatusTone {
+        guard isEnabled else { return .off }
+        return switch connection {
+        case .idle: .off
+        case .scanning, .connecting: .busy
+        case .connected: .active
+        case .standby, .backedOff: .standby
+        case .unavailable: .attention
+        }
+    }
+
     public var lastFixDescription: String? {
         guard let lastFix else { return nil }
         return String(
