@@ -39,6 +39,19 @@ struct SettingsView: View {
                         + "own Auto Time Correction / Auto Area Adjust settings decide whether to apply them.")
                 }
 
+                Section {
+                    Toggle("Reconnect in background", isOn: backgroundResumeBinding)
+                } header: {
+                    Text("Background")
+                } footer: {
+                    Text("When your camera powers back on, Alfa reconnects and resumes geotagging on its own — even with "
+                        + "the app in the background. While the camera is off, Alfa never writes to it: with "
+                        + "\u{201C}Cnct. while Power OFF\u{201D} = Off (recommended) the camera goes fully silent and "
+                        + "waiting for it costs nothing; with it On, Alfa holds the link idle so it adds no traffic of "
+                        + "its own. Turn this off for the conservative path (reconnect only when you open the app or "
+                        + "tap Sync now).")
+                }
+
                 #if DEBUG
                 Section {
                     Toggle("Freeze location pushes", isOn: freezeBinding)
@@ -72,6 +85,10 @@ struct SettingsView: View {
 
     private var timeZoneBinding: Binding<Bool> {
         Binding(get: { coordinator.syncTimeZone }, set: { coordinator.setSyncTimeZone($0) })
+    }
+
+    private var backgroundResumeBinding: Binding<Bool> {
+        Binding(get: { coordinator.backgroundResume }, set: { coordinator.setBackgroundResume($0) })
     }
 
     #if DEBUG
