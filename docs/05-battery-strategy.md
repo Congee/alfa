@@ -63,7 +63,9 @@ cheap and expected — the camera radio is already awake.
    `connect()`. Connect only when the advertisement's `0x21` power group reports the camera on (bit `0x40`); an
    advertisement reporting *off* is an off-but-connectable "Cnct. while Power OFF" camera, so Alfa **declines** and
    keeps scanning briefly (bounded, `CameraLink.offWaitSeconds`) to reconnect the instant it powers on, then backs off.
-   This is what makes the reconnect safe: Alfa never wakes or holds an off camera, because it never connects to one.
+   In the **foreground** this keeps the reconnect safe by never connecting to an off camera. In the **background** the
+   power gate can't run (no manufacturer data), so Alfa instead connects and — if the camera turns out to be off —
+   holds the link *dormant without writing to it* (the standby hold, below), which is what keeps that path drain-safe.
 
    > **Why not `CC05`?** The original design bailed on standby via the `CC05` power-state characteristic. On the A7R V
    > (fw 4.0) `CC05` is **silent** — no notification and no read response (verified on-device 2026-07-14, `docs/08`
@@ -73,34 +75,96 @@ cheap and expected — the camera radio is already awake.
    > the A7R V; independently documented by gethypoxic/whc2001 and used operationally by `ekutner/camera-gps-link`).
 
    **Foreground vs background.** The gate needs the advertisement's manufacturer data, which iOS delivers only to a
-   **foreground** scan. So reliable resume-on-power-on is a foreground (or explicit "Sync now") behaviour. A background
-   scan can't inspect the advertisement, so Alfa deliberately does **not** blind-connect from the background (that would
-   re-link to and drain an off-but-connectable camera); it backs off instead and resumes on the next foreground/Sync.
-   The one blind `connect()` still allowed is the foreground fallback when the scan sees **no** advertisement at all
-   (camera fully off / out of range, i.e. *not* connectable-while-off) — a harmless standing intent iOS services on real
-   power-on, which also survives into the background to give power-on resume for the well-behaved (Cnct-OFF) config.
-   Net trade-off: with "Cnct. while Power OFF" **enabled**, background auto-resume is traded away to guarantee zero
-   drain — another reason Alfa nudges the user to disable that setting (below), which restores full, safe background
-   resume. *(✅ Resolved on-device 2026-07-14 — replaces the abandoned CC05 standby bail.)*
+   **foreground** scan. So in the foreground Alfa scans, reads the `0x21` power flags, and connects only to a
+   powered-on camera. A background scan can't inspect the advertisement (iOS strips manufacturer data) and can't even
+   see a Sony camera reliably (the location service is a 128-bit UUID, not advertised), so the power gate is a
+   foreground-only mechanism. Background resume therefore rides a **standing `connect()`**, not a scan.
+
+   **The drain was never the standing connect — it was churning an off camera.** *(Corrected on-device 2026-07-14,
+   superseding an earlier "background auto-resume is impossible for a Cnct-ON camera" conclusion.)* A device-log capture
+   during a background power-cycle showed the real mechanism: on every reconnect to an off-but-connectable camera Alfa
+   ran full service discovery, declared `ready` **before any write was acknowledged**, and pushed location — all of
+   which failed (`ready — services + handshake complete` immediately followed by `write FAILED on DD30/DD31/DD11:
+   Unknown ATT error`) — then the link dropped and the cycle repeated. That premature-`ready`-then-failed-write **churn**
+   was the drain. When the camera was genuinely on, the identical path worked (`location write acked`, steady keep-alives).
+
+   **The fix: acknowledge-gated readiness + a dormant standby hold.** The fw-gated handshake is now **sequential and
+   ack-gated**: write `0x01` to DD30 (unlock); only on its acknowledgement write DD31 (enable); only on *its*
+   acknowledgement declare `.ready`. A link to a powered-off "Cnct. while Power OFF" camera accepts the connection but
+   *rejects* these writes (ATT error), so instead of a false `ready` + failed-push storm the link enters **standby**
+   (`CameraLink.enterStandby` → `LinkEvent.standby` → `CameraConnectionState.standby`): it is **held dormant** — no
+   writes, no reconnect churn — and re-probes the handshake on a slow timer (`standbyProbeSeconds`, 60 s) and on any
+   characteristic notification. The instant the camera powers on, a probe's writes acknowledge (or the camera drops and
+   the standing connect re-links to a now-powered-on body) → `.ready` → geotagging resumes. A drop *from* standby
+   re-arms the standing connect (`GeotagPolicyEngine` treats `.standby` like `.connected` for reconnect), so power-on
+   resume survives even if the dormant link is cycled. Alfa-side churn is eliminated in **any** camera configuration:
+   the connection is held quietly rather than being repeatedly re-established and written to. Whether merely *holding*
+   a link to a Cnct-ON off camera costs its battery anything is a camera-side property only the IT-10 field
+   measurement can settle — with Cnct-OFF the question doesn't arise, because a silent camera has nothing to hold.
+
+   **Field refinement (2026-07-14, second capture): the camera accepts a reconnect before it serves its GATT.** A
+   **Cnct-OFF** A7R V goes silent at lever-off, so the standing connect completed only at lever-**on** — but it
+   completed in the camera's **boot window**: the radio answered within a second, *before* the Sony services existed,
+   and **service discovery returned no Sony service** (a reduced GATT). The link then sat "connected" with nothing to
+   handshake against, no error, and nothing to probe: a silent zombie that never became ready and, once the app was
+   suspended, could never wake (a dispatch-timer probe doesn't fire in a suspended app). The same reduced-GATT
+   behaviour presumably applies to a Cnct-ON off-standby body (unverified). Three mechanisms close this: (1) **every
+   connect → ready pipeline is watchdogged** (`discoveryStallSeconds`, 15 s) and a failed / Sony-service-less /
+   characteristic-less discovery all converge into the same standby hold; (2) the standby probe **re-runs service
+   discovery** when it has no characteristics to handshake with (covers foreground/awake recovery); and (3) — the
+   crux for the background — the camera's **Service Changed indication** (`peripheral(_:didModifyServices:)`): once
+   booted the camera restores its full GATT, the bonded indication *does* wake a suspended app, and the handler
+   re-discovers → handshake acks → `.ready` → geotagging resumes right at the lever-on, not a probe interval later.
+
+   **The "Reconnect in background" toggle (`GeotagSettings.backgroundResume`, default on).** Two kept code paths:
+   - **On (default):** on a dropped/dormant link, `CameraLink.beginDiscovery` registers a standing `connect()` to the
+     known camera immediately (not via a scan — background scans surface nothing and iOS may suspend us before a scan
+     timeout). iOS fulfils it on the camera's next power-on, relaunching Alfa via state restoration; an off camera that
+     answers early is held in standby (above) until it powers on.
+   - **Off (conservative):** background disconnects back off; resume on foreground / "Sync now" only.
+
+   > **Net for the user:** background auto-resume works functionally with "Cnct. while Power OFF" either on or off.
+   > The **proven, Geotag-Alpha-parity configuration is Off**: the camera goes fully silent when the lever is off, so
+   > the standing connect waits for free (zero drain *by construction* — there is nothing to hold and nothing to talk
+   > to) and iOS completes it the instant the camera powers on. With it **On**, Alfa answers the off camera's link but
+   > holds it dormant without a single write, so Alfa adds no churn — but the absolute cost of the held link is a
+   > camera-side property pending a field measurement (`docs/08` IT-10). Note Geotag Alpha itself makes no drain-free
+   > claim for Cnct-ON (its changelog auto-disables fast reconnect there); do not hold Alfa's Cnct-ON behaviour to a
+   > standard no app is known to meet. *(Alfa-side churn eliminated + verified in logs 2026-07-14.)*
 
 ### Keep the camera's fix alive while connected (staleness ≠ churn)
 
 Separately from connection churn, the camera **silently expires** a location fix that stops being refreshed (the
 "Location information cannot be obtained" overlay) and announces that over no BLE characteristic — so it must be
-*prevented*, not reacted to. While connected, Alfa re-pushes the last position on a ~10 s keep-alive (matching Sony's
-own cadence) whenever nothing else has written for that long — driven off the write timeline, so a moving phone that is
+*prevented*, not reacted to. While connected, Alfa re-pushes the last position on a **45 s** keep-alive
+(`ConnectionPolicy.keepAliveSeconds`, the single source of truth for the cadence) whenever nothing else has written for
+that long — comfortably inside the camera's ~60 s tolerance (user-confirmed; exact number pinned by `08` IT-11) while
+sending ~4–5× fewer writes than Sony's own ~10 s cadence. Driven off the write timeline, so a moving phone that is
 already pushing never adds redundant writes. This is orthogonal to the anti-churn rules above: it only ever runs on an
-*established* link and never issues a connect. (Timeout measured on-device: `08` IT-11.)
+*established* link and never issues a connect.
+
+**The heartbeat needs runtime — so location runs continuously while (and only while) a camera is connected.** iOS's
+stationary auto-pause (`pausesLocationUpdatesAutomatically`) suspends the app, freezing the heartbeat timer
+mid-session: the 2026-07-14 field log shows a 4-minute background silence that let the camera expire its fix even
+though the link was up. `LocationProvider.setContinuous(_:)`, driven by the connection state, disables the auto-pause
+(and explicitly restarts updates — a pause never undoes itself) for exactly the lifetime of a `.connected` link, and
+restores the battery-smart default in every other state — so the phone-side cost is bounded by the time a camera is
+actually on and linked, and an idle background Alfa costs nothing extra. Stale cached fixes CoreLocation replays on a
+restart (which can be minutes old and whose embedded timestamp the camera may treat as time correction) are filtered
+at the source.
 
 ### State restoration is part of the fix, not a loophole in it
 
-Opting into CoreBluetooth state restoration (a restore identifier + `willRestoreState`) is what lets Alfa *cancel* a
-standing intent that outlived termination. iOS relaunches the app to service a pending `connect()`; on that relaunch
-Alfa re-adopts the peripheral and, **only if the link actually survived**, resumes it. A restored-but-dropped or
-still-pending link is deliberately **not** reconnected — the pending `connect()` is cancelled and the policy backs
-off. Without restoration, a standing intent held at termination would become a permanent background wake magnet with
-no chance to cancel it; with restoration, every relaunch is an opportunity to tear it down cleanly. The enabled state
-is persisted so the resume is automatic and non-interactive (no permission prompts on a background launch).
+Opting into CoreBluetooth state restoration (a restore identifier + `willRestoreState`) is what lets Alfa *decide
+about* a standing intent that outlived termination. iOS relaunches the app to service a pending `connect()`; on that
+relaunch Alfa re-adopts the peripheral and decides by its actual state and the "Reconnect in background" setting: a
+link that **survived** resumes immediately; with background resume **on**, a still-**pending** standing connect is
+kept in place (it *is* the auto-resume mechanism — cancelling it would race the very `didConnect` the relaunch may be
+delivering) and a **dropped** link re-arms a fresh standing connect; with background resume **off**, the pending
+intent is cancelled and the policy backs off. Without restoration, a standing intent held at termination would be
+unreachable — neither resumable nor cancellable; with restoration, every relaunch is an opportunity to handle it
+deliberately. The enabled state is persisted so the resume is automatic and non-interactive (no permission prompts on
+a background launch).
 
 ### Consider AccessorySetupKit (OQ3)
 

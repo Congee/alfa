@@ -240,14 +240,15 @@ exiftool -T -DateTimeOriginal -GPSLatitude -GPSLongitude *.ARW
 3. Let it run ≥5 min, then stop and read EXIF.
 
 **Result to record:** the gap between the last GPS-tagged frame and the first untagged one brackets the timeout to
-±10 s (shorten the interval to tighten). **This number sets the safety margin for the keep-alive** — `heartbeatInterval`
-(currently **10 s**, matching Sony's own Creators' App cadence, `docs/07`) must stay well under it. If the measured
-timeout is < ~20 s, lower `heartbeatInterval` accordingly.
+±10 s (shorten the interval to tighten). **This number sets the safety margin for the keep-alive** —
+`ConnectionPolicy.keepAliveSeconds` (currently **45 s**, chosen against the user-observed ~60 s tolerance; the
+coordinator's `heartbeatInterval` derives from it) must stay well under it. If the measured timeout is < ~55 s, lower
+`keepAliveSeconds` accordingly.
 
 ### IT-11b (T2) — Prove the heartbeat prevents expiry, and recovers
 1. Same rig, **Freeze = Off**. Do **not** move. Start interval shooting; run ≥ (2× the T1 timeout).
-   **Expect:** every frame stays GPS-tagged — the 10 s keep-alive re-push holds the fix despite zero movement.
-   *(UI corroboration: `Fixes pushed` increments ~every 10 s while stationary.)*
+   **Expect:** every frame stays GPS-tagged — the 45 s keep-alive re-push holds the fix despite zero movement.
+   *(UI corroboration: `Fixes pushed` increments ~every 45 s while stationary.)*
 2. Now flip **Freeze = On**, let the overlay expire (per T1), then flip **Freeze = Off**.
    **Expect:** the overlay returns to "obtained" and frames re-tag **without a reconnect** — the resume-push (fired
    immediately on un-freeze) re-arms the fix. If instead it only recovers after a full disconnect/reconnect, record
