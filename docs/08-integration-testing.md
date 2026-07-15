@@ -358,6 +358,38 @@ in three conditions — **(a) no app**, **(b) Alfa only**, **(c) Alfa + Creators
 **Pass:** (b) is indistinguishable from (a); (c) reproduces the drain (confirming the multi-suitor root cause, not an
 Alfa regression). Document the procedure so it can be repeated after any connection-engine change.
 
+### Runbook (one condition per night; keep everything else identical)
+
+**Held constant across nights:** same battery (note its age/health), charged to a known starting % (100 %, or read the
+exact % off the monitor's battery indicator); same room / temperature; camera **lever off** for the whole window;
+window ≥ 8 h and the *same length* every night (set an alarm — Δ% only compares across equal windows); camera
+Bluetooth **On**; phone on its usual overnight charger within BLE range.
+
+| Night | Condition | Camera `Cnct. while Power OFF` | Phone side |
+|-------|-----------|--------------------------------|------------|
+| (a) | baseline, no suitor | **On** | Alfa geotag **disabled** (or app deleted); no Creators' App running |
+| (b) | Alfa only — prices the **dormant standby hold** | **On** | Alfa enabled, backgrounded (do **not** swipe-kill) |
+| (b′) | Alfa only — the **recommended shipping config** | **Off** | Alfa enabled, backgrounded |
+| (c) | churn repro — the drain Alfa exists to avoid | **On** | Creators' App (or Alpha Remote) installed + linked, Alfa enabled too |
+
+**Per night:** ① note start % and wall-clock time just before lever-off; ② hands off for the window; ③ at the end,
+*before* powering the camera on, run `Tools/alfa-logs.sh <window-minutes>` on the Mac — the overnight marker stream is
+the churn evidence (count `connected`/`disconnected`/`standby` cycles; condition (b) should show the initial link
+settling into `standby` and then near-silence — the 60 s probe runs only while iOS keeps the app awake, a suspended
+app writes nothing — and never a connect/disconnect loop); ④ lever on, note end %.
+
+**Read:** Δ(b) ≈ Δ(a) within the camera's 1 % display resolution ⇒ the dormant hold is free — pass. Δ(b) > Δ(a) but
+log shows no Alfa churn ⇒ the *held link itself* costs the camera power ⇒ implement the advertisement-byte pre-connect
+discriminator (IT-12's ⚠️ fallback) and re-run. Δ(b′) ≈ Δ(a) is expected by construction (camera radio-silent);
+a failure there means the standing connect is somehow waking the body — investigate before shipping. (c) is the
+control: it *should* drain visibly, proving the measurement can detect the disease at all.
+
+**Results (fill in):**
+
+| Date | Condition | Window (h) | Start % | End % | Δ% | Churn in log? | Notes |
+|------|-----------|------------|---------|-------|----|---------------|-------|
+| | | | | | | | |
+
 ---
 
 ## Pass/fail summary
