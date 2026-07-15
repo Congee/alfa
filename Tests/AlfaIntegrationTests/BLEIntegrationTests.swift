@@ -74,7 +74,7 @@ final class BLEIntegrationTests: XCTestCase {
                 case .stateChanged(let state):
                     NSLog("[IT] stateChanged(\(state))")
                     if state == .connected { connected.fulfill() }
-                case .locationPushed(let count):
+                case .locationPushed(let count, _):
                     NSLog("[IT] locationPushed(\(count))")
                     if count == 1 { pushed.fulfill() } // exact: a second push must not over-fulfill (fatal in XCTest)
                 case .failure(let message):
@@ -128,7 +128,7 @@ final class BLEIntegrationTests: XCTestCase {
                 case .stateChanged(let state):
                     NSLog("[IT] stateChanged(\(state))")
                     if state == .connected { connected.fulfill() }
-                case .locationPushed(let count):
+                case .locationPushed(let count, _):
                     NSLog("[IT] locationPushed(\(count))")
                     // Exact matches: `>=` would re-fulfill on the next push, and XCTest treats an over-fulfilled
                     // expectation as a fatal API violation (it crashes the runner — seen on-device 2026-07-15).

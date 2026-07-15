@@ -70,7 +70,10 @@ The core of the project. Deliver GPS + time sync **and** the "good BLE citizen" 
       setting for the camera to emit focus events (IT-13).
       **Use GPS time** — optional CC13 clock source from the GNSS fix's timestamp (fresh-fix-gated, deferred write).
       **Connection diagnostics** — persisted reconnect counts (background tallied separately) + time connected, on
-      Home. *Camera battery display investigated and parked: no verified BLE path exists (docs/03).*
+      Home.
+      **Map view** — Home shows the last position actually acknowledged by the camera (the ack event now carries the
+      fix; coordinator exposes it as a plain coordinate) on a MapKit map, cleared on forget. *Camera battery display
+      investigated and parked: no verified BLE path exists (docs/03).*
 - [~] On-device validation on A7R V fw 4.0 (`08-integration-testing.md`): **IT-2 pair ✅**, **IT-4 CC13 clock ✅
       verified** (local-wall-clock interpretation correct — no UTC flip needed), **IT-12b background power-cycle
       reconnect ✅ field-verified (2026-07-15)** — lever off → on with the app backgrounded re-links and resumes

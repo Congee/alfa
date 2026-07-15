@@ -50,7 +50,8 @@ public enum CameraEvent: Sendable, Equatable {
     case discovered(peripheralID: UUID, modelCode: String?, rssi: Int)
     /// The connected camera's identity (its advertised name), for the UI's camera indicator.
     case cameraIdentified(peripheralID: UUID, name: String?)
-    case locationPushed(count: Int)
+    /// A location write was acknowledged; `fix` is the position the camera now holds (drives the Home map marker).
+    case locationPushed(count: Int, fix: LocationFix?)
     case failure(String)
 }
 

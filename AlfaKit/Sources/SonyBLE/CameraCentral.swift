@@ -221,7 +221,8 @@ public actor CameraCentral {
 
         case .wroteLocation:
             pushCount += 1
-            eventContinuation.yield(.locationPushed(count: pushCount))
+            // `state.lastPushed` is the position this ack confirms — the UI's "what the camera has" (map marker).
+            eventContinuation.yield(.locationPushed(count: pushCount, fix: state.lastPushed))
 
         case let .notify(characteristic, value):
             // CC05 is the camera's power/standby signal: a confirmed power-off proactively tears down the link and

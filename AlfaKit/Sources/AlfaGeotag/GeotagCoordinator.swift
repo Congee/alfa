@@ -21,6 +21,9 @@ public final class GeotagCoordinator {
     public private(set) var cameraName: String?
     public private(set) var lastFix: LocationFix?
     public private(set) var pushCount = 0
+    /// The last position actually written to (and acknowledged by) the camera — what its geotag will say. Drives the
+    /// Home map. Survives disconnects (it stays true: the camera keeps that fix); cleared when the camera is forgotten.
+    public private(set) var lastPushedCoordinate: CLLocationCoordinate2D?
     public private(set) var lastError: String?
     /// System Bluetooth availability (for the onboarding/permissions UI).
     public private(set) var bluetooth: BluetoothAvailability = .unknown
@@ -234,6 +237,7 @@ public final class GeotagCoordinator {
     /// disconnect and stop retrieving it. The next enable/sync scans for a camera afresh.
     public func forgetCamera() {
         cameraName = nil
+        lastPushedCoordinate = nil // the map shows *that* camera's fix
         stats = ConnectionStats() // diagnostics belong to the camera relationship being forgotten
         statsStore.save(stats)
         Task { await central.forgetCamera() }
@@ -435,8 +439,9 @@ public final class GeotagCoordinator {
         case let .bluetoothAvailability(availability): bluetooth = availability
         case .discovered: break
         case let .cameraIdentified(_, name): cameraName = name ?? "Sony camera"
-        case let .locationPushed(count):
+        case let .locationPushed(count, fix):
             pushCount = count
+            if let fix { lastPushedCoordinate = CLLocationCoordinate2D(latitude: fix.latitude, longitude: fix.longitude) }
             // Every write (real push or keep-alive) pushes the keep-alive deadline back, so the heartbeat only fires
             // after a full interval of silence — i.e. when stationary.
             armHeartbeat()

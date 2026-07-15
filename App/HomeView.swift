@@ -1,4 +1,5 @@
 import AlfaGeotag
+import MapKit
 import SwiftUI
 
 /// The main status + controls screen: connection/permission status, enable/sync, and camera management.
@@ -8,6 +9,8 @@ struct HomeView: View {
     var onSetUp: () -> Void
 
     @State private var showForgetConfirm = false
+    /// `.automatic` frames the marker and keeps following it as pushes land, until the user pans/zooms away.
+    @State private var mapPosition: MapCameraPosition = .automatic
 
     var body: some View {
         NavigationStack {
@@ -35,6 +38,21 @@ struct HomeView: View {
                         LabeledContent("Last error", value: error)
                             .foregroundStyle(.orange)
                             .font(.footnote)
+                    }
+                }
+
+                if let coordinate = coordinator.lastPushedCoordinate {
+                    Section {
+                        Map(position: $mapPosition) {
+                            Marker("Camera", systemImage: "camera.fill", coordinate: coordinate)
+                                .tint(.orange)
+                        }
+                        .frame(height: 220)
+                        .listRowInsets(EdgeInsets())
+                    } header: {
+                        Text("Camera location")
+                    } footer: {
+                        Text("The last position sent to the camera — what its next photo will be tagged with.")
                     }
                 }
 
