@@ -158,6 +158,82 @@ final class BLEIntegrationTests: XCTestCase {
         await central.stop()
     }
 
+    /// Requires the Mac sim in **any** mode (default `none`) — the FF01 echoes are write-driven, not scripted.
+    /// Proves Phase 2's capture sequence end to end over the real radio: `shutterTapped()` → FF01 half-press → the
+    /// sim's focus-ack → FF01 full-press → picture-being-taken (Exposing indicator) → release-through →
+    /// shutter-ready (exposure duration recorded). Then a record tap → `02 D5 20` → wire-confirmed recording, and a
+    /// second tap stops it.
+    func testShutterTapRunsCaptureSequence() async throws {
+        try requireIntegrationEnv()
+        let central = Self.makeTestCentral()
+
+        let connected = expectation(description: "connected to the mock camera")
+        let pushed = expectation(description: "initial on-connect push")
+        let exposing = expectation(description: "picture-being-taken observed (exposure started)")
+        let exposureFinished = expectation(description: "shutter-ready observed (exposure duration recorded)")
+        let recordingStarted = expectation(description: "wire-confirmed recording started")
+        let recordingStopped = expectation(description: "wire-confirmed recording stopped")
+
+        let monitor = Task {
+            // Transition-guarded fulfillments: remote state re-emits on every field change, so matching a *level*
+            // (e.g. exposureStartedAt != nil) would over-fulfill — fatal in XCTest. Track edges instead.
+            var wasExposing = false
+            var wasRecording = false
+            for await event in central.events {
+                switch event {
+                case .stateChanged(let state):
+                    NSLog("[IT] stateChanged(\(state))")
+                    if state == .connected { connected.fulfill() }
+                case .locationPushed(let count, _):
+                    NSLog("[IT] locationPushed(\(count))")
+                    if count == 1 { pushed.fulfill() }
+                case .remoteControl(let remote):
+                    NSLog("[IT] remote(shutter=\(String(describing: remote.shutter)) exposing=\(remote.exposureStartedAt != nil) recording=\(remote.isRecording))")
+                    if !wasExposing, remote.exposureStartedAt != nil {
+                        wasExposing = true
+                        exposing.fulfill()
+                    } else if wasExposing, remote.exposureStartedAt == nil, remote.lastExposureSeconds != nil {
+                        wasExposing = false
+                        exposureFinished.fulfill()
+                    }
+                    if !wasRecording, remote.isRecording {
+                        wasRecording = true
+                        recordingStarted.fulfill()
+                    } else if wasRecording, !remote.isRecording {
+                        wasRecording = false
+                        recordingStopped.fulfill()
+                    }
+                case .failure(let message):
+                    NSLog("[IT] failure(\(message))")
+                default:
+                    break
+                }
+            }
+        }
+
+        await central.start()
+        await central.setEnabled(true)
+        let feeder = startFeedingStationary(central)
+
+        await fulfillment(of: [connected, pushed], timeout: 45)
+        // Give the remote-control service discovery a beat to settle — FF01 is discovered in the same pass as the
+        // handshake characteristics but its assignment isn't ordered against `.connected`.
+        try await Task.sleep(nanoseconds: 1_000_000_000)
+
+        await central.shutterTapped()
+        await fulfillment(of: [exposing], timeout: 15)
+        await fulfillment(of: [exposureFinished], timeout: 15)
+
+        await central.recordTapped()
+        await fulfillment(of: [recordingStarted], timeout: 15)
+        await central.recordTapped()
+        await fulfillment(of: [recordingStopped], timeout: 15)
+
+        feeder.cancel()
+        monitor.cancel()
+        await central.stop()
+    }
+
     /// Requires the Mac sim in **`ALFA_SIM_SCRIPT=standby`** mode (it sends a CC05 power-off notification shortly after
     /// the first location write). Proves the standby-bail path over the real radio: on a CC05 `off` signal the engine
     /// backs off (no standing connect, no auto-reconnect) rather than churning.

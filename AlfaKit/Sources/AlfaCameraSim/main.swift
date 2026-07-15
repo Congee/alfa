@@ -75,6 +75,8 @@ final class CameraSim: NSObject, @unchecked Sendable {
     private var remoteStatusChar: CBMutableCharacteristic!
 
     private var cameraAwake = true
+    /// Movie-recording toggle state, flipped by FF01 record presses and echoed as `02 D5` (like a real body).
+    private var recording = false
 
     private var lastWriteDate: Date?
     private var locationExpired = false
@@ -147,8 +149,13 @@ final class CameraSim: NSObject, @unchecked Sendable {
         remoteStatusChar = CBMutableCharacteristic(
             type: SonyCBUUID.remoteStatus, properties: [.notify], value: nil, permissions: []
         )
+        // FF01: Phase 2's command endpoint. Incoming press/release writes are echoed as the FF02 statuses a real
+        // body answers with, so the capture sequence can be exercised end to end over the radio (`handleWrite`).
+        let remoteCommandChar = CBMutableCharacteristic(
+            type: SonyCBUUID.remoteCommand, properties: [.write], value: nil, permissions: [.writeable]
+        )
         let remoteControlService = CBMutableService(type: SonyCBUUID.remoteControlService, primary: true)
-        remoteControlService.characteristics = [remoteStatusChar]
+        remoteControlService.characteristics = [remoteStatusChar, remoteCommandChar]
 
         return [locationService, cameraControlService, remoteControlService]
     }
@@ -298,10 +305,57 @@ final class CameraSim: NSObject, @unchecked Sendable {
             simLog("[SIM] handshake DD31")
         case SonyCBUUID.cameraTimeSync:
             simLog("[SIM] CC13 clock write")
+        case SonyCBUUID.remoteCommand:
+            handleRemoteCommand(bytes)
         default:
             break
         }
         manager.respond(to: request, withResult: .success)
+    }
+
+    /// Answers FF01 command writes with the FF02 statuses a real body sends, so the engine's capture sequencing can
+    /// be exercised end to end over a real radio. Timings are short but nonzero — the real camera also answers
+    /// asynchronously, and the sequence must survive that.
+    private func handleRemoteCommand(_ bytes: [UInt8]) {
+        switch bytes {
+        case SonyRemoteCommand.shutterHalf.press:
+            simLog("[SIM] FF01 half-press — focus in 0.15s")
+            queue.asyncAfter(deadline: .now() + 0.15) { [self] in
+                manager.updateValue(Data([0x02, 0x3F, 0x20]), for: remoteStatusChar, onSubscribedCentrals: nil)
+                simLog("[SIM] FF02 notify -> focus acquired")
+            }
+        case SonyRemoteCommand.shutterHalf.release:
+            simLog("[SIM] FF01 half-release")
+            manager.updateValue(Data([0x02, 0x3F, 0x00]), for: remoteStatusChar, onSubscribedCentrals: nil)
+        case SonyRemoteCommand.shutterFull.press:
+            simLog("[SIM] FF01 full-press — exposing in 0.15s, done 0.5s later")
+            queue.asyncAfter(deadline: .now() + 0.15) { [self] in
+                manager.updateValue(Data([0x02, 0xA0, 0x20]), for: remoteStatusChar, onSubscribedCentrals: nil)
+                simLog("[SIM] FF02 notify -> picture being taken")
+            }
+            queue.asyncAfter(deadline: .now() + 0.65) { [self] in
+                manager.updateValue(Data([0x02, 0xA0, 0x00]), for: remoteStatusChar, onSubscribedCentrals: nil)
+                simLog("[SIM] FF02 notify -> shutter ready")
+            }
+        case SonyRemoteCommand.shutterFull.release:
+            simLog("[SIM] FF01 full-release")
+        case SonyRemoteCommand.record.press:
+            recording.toggle()
+            let status: [UInt8] = recording ? [0x02, 0xD5, 0x20] : [0x02, 0xD5, 0x00]
+            simLog("[SIM] FF01 record toggle -> \(recording ? "recording" : "stopped")")
+            queue.asyncAfter(deadline: .now() + 0.15) { [self] in
+                manager.updateValue(Data(status), for: remoteStatusChar, onSubscribedCentrals: nil)
+            }
+        case SonyRemoteCommand.record.release:
+            simLog("[SIM] FF01 record release")
+        case SonyRemoteCommand.afOn.press, SonyRemoteCommand.afOn.release,
+             SonyRemoteCommand.c1.press, SonyRemoteCommand.c1.release:
+            simLog("[SIM] FF01 button \(bytes.map { String(format: "%02X", $0) }.joined(separator: " "))")
+        default:
+            // Unknown opcodes (e.g. the zoom/MF probe candidates) — acknowledged, logged, no echo: the sim must
+            // never pretend to answer a question only the real camera can.
+            simLog("[SIM] FF01 unknown command \(bytes.map { String(format: "%02X", $0) }.joined(separator: " "))")
+        }
     }
 
     private func handleRead(_ request: CBATTRequest) {

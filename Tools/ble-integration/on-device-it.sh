@@ -60,6 +60,7 @@ fail=0
 run_scenario none    testConnectsHandshakesAndPushesLocation || fail=1
 run_scenario standby testBacksOffOnCameraStandby             || fail=1
 run_scenario focus   testFocusTriggersImmediatePush          || fail=1
+run_scenario none    testShutterTapRunsCaptureSequence       || fail=1
 echo "==========================================="
 [[ $fail -eq 0 ]] && echo "ALL ON-DEVICE INTEGRATION TESTS PASSED" || echo "SOME ON-DEVICE INTEGRATION TESTS FAILED"
 exit $fail

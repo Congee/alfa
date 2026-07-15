@@ -32,6 +32,12 @@ is compiled out of release builds and inert unless the env var is set.
   - `focus` — sends an `FF02` focus-acquired notification (`02 3F 20`, then the release) ~2 s after the first
     location write, then a shutter-fired pair (`02 A0 20/00`) ~6 s after it — past the engine's 2 s capture throttle,
     so both triggers must each produce a push.
+
+  In every mode the sim also serves a **writable `FF01`** and echoes incoming remote commands as the FF02 statuses a
+  real body answers with (half-press → focus-ack; full-press → picture-being-taken → shutter-ready; record press →
+  `02 D5` toggle) — Phase 2's capture sequencing is exercised write-driven, no script needed. Unknown opcodes (the
+  zoom/MF probe candidates) are acked and logged but never echoed: the sim must not pretend to answer a question
+  only the real camera can.
 - **`Tests/AlfaIntegrationTests/BLEIntegrationTests.swift`** — on-device XCTest, hosted by the Alfa app (so it inherits
   the app's Bluetooth entitlement, usage strings, and existing permission grant). Drives the real `CameraCentral` and
   asserts. Skipped unless `ALFA_RUN_BLE_IT=1`.
@@ -55,6 +61,7 @@ in another (see the script for the exact invocation and the `.xctestrun` env inj
 | `connect` | `none`    | discover → bond (notify-subscribe) → fw handshake (DD30/DD31) → DD11 push       | ✅ PASS |
 | `standby` | `standby` | `CC05` off notification → engine backs off (no standing connect, no reconnect)  | ✅ PASS |
 | `focus`   | `focus`   | `FF02` focus-acquired *and* shutter-fired → immediate DD11 pushes while stationary | ✅ PASS |
+| `capture` | `none`    | `shutterTapped()` → FF01 half → focus-ack → full → exposing → release-through → duration; record toggle via `02 D5` | ✅ PASS |
 
 ## Known limitation: a hard power-off (reconnect) can't be emulated from a macOS peripheral
 
