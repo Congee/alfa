@@ -5,10 +5,26 @@ import Foundation
 public struct RememberedCamera: Sendable, Equatable, Codable {
     public let id: UUID
     public let name: String?
+    /// The camera's "Cnct. while Power OFF" state, as last read from its advertisement (`0x21` bit `0x80`):
+    /// `false` = goes radio-silent when powered down (a background standing-connect is drain-safe — it only completes on
+    /// a genuine power-on); `true` = keeps advertising while off (a background standing-connect would re-link to and
+    /// drain it — declined); `nil` = not yet observed. Persisted so the background-resume safety gate is known even on a
+    /// cold, scan-less relaunch.
+    public let connectsWhilePoweredOff: Bool?
 
-    public init(id: UUID, name: String?) {
+    public init(id: UUID, name: String?, connectsWhilePoweredOff: Bool? = nil) {
         self.id = id
         self.name = name
+        self.connectsWhilePoweredOff = connectsWhilePoweredOff
+    }
+
+    /// Tolerant decode so a camera persisted by a build predating `connectsWhilePoweredOff` still loads (the field then
+    /// reads `nil` = unknown, which the safety gate treats conservatively — no background standing-connect).
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        name = try container.decodeIfPresent(String.self, forKey: .name)
+        connectsWhilePoweredOff = try container.decodeIfPresent(Bool.self, forKey: .connectsWhilePoweredOff)
     }
 }
 
