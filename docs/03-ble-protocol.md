@@ -92,6 +92,15 @@ Each button is a **state pair**: a distinct press (down) and release (up), not a
 **Capture rule ✅:** a bare full-press is ignored ~2/3 of the time. Always: half-press → wait for focus-ack on `FF02` →
 full-press → wait for shutter-active → release. Wrong ordering can lock the camera.
 
+**Implemented (Phase 2, 2026-07-15):** `CameraLink` discovers + writes `FF01` behind the same ack-gated-handshake
+gate as location writes (a standby/dormant link never sees a command; a rejected/skipped write aborts the in-flight
+belief). The capture rule lives in the pure `RemoteControlEngine` (`SonyBLE/RemoteControlPolicy.swift`, host-tested):
+every shutter path funnels through half-before-full; the focus-ack wait *escalates* on timeout (an MF lens never
+sends `3F 20` — the camera's release-priority setting stays the authority); release-through happens on
+shutter-active. Verified end-to-end over the radio against the sim's FF01→FF02 echo (harness `capture` scenario).
+Record (`01 0F/0E`) is driven tap-only — the wire models a toggle, and recording state is believed only from
+`02 D5` (⚠️ still not A7R V-verified — `docs/08` IT-15).
+
 ### Zoom / manual-focus step commands 🔴
 
 3-byte writes `[0x02, opcode, step]` with opcodes in the `44/45/46/47` and `6A/6B/6C/6D` groups, step `0x10` or `0x20`.

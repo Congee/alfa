@@ -388,6 +388,30 @@ byte 13 against the camera's own battery display; note whether a *notify* arrive
 connected; if convenient, once with a charger attached. Only after byte 13 tracks the display does a battery UI
 (GA-parity item) get built.
 
+## IT-15 — Remote control on the real body *(real camera, foreground)*
+
+The harness `capture` scenario proves the sequencing against the sim; this pins the real A7R V's behavior.
+**Pre:** connected + geotagging; camera's Bluetooth remote-control setting on (pin its exact menu path here when
+running this — do not guess it); Remote tab open.
+**Steps & expect:**
+1. *Tap shutter (tap mode):* a photo fires; log shows `remote command → camera (01 07)` → `notify FF02 = 02 3F 20`
+   → `(01 09)` → `02 A0 20` → releases `(01 08)(01 06)`; banner flashes FOCUSING → EXPOSING. With an MF lens (or AF
+   defeated): the focus wait times out after 3 s, the full-press still goes out, and release priority decides.
+2. *Hold shutter:* ≥350 ms hold sustains a half-press (camera AF engages, no shot) until lift.
+3. *Two-stage mode:* ring holds S1; center fires S2 — in BULB, holding the center times the exposure and the EXP
+   counter runs until release; the estimated NR countdown then appears (long exposures).
+4. *AF-ON / C1:* press = camera AF-ON / C1 action while held; 800 ms long-press latches (lock glyph), tap unlocks.
+5. *Record:* tap REC → `02 D5 20` in the log + red RECORDING banner + elapsed; tap again → `02 D5 00`.
+   **This is the first-party verification of the `02 D5` codes** — record the result in docs/03.
+6. *Remote setting off:* flip the camera's remote setting off → any press surfaces the "remote-control setting is
+   off" hint (or the camera goes silent — note which).
+7. *Coexistence:* while using the remote, geotagging keeps pushing (map marker fresh) — DD11 and FF01/FF02 share
+   the one link.
+8. *Opcode probe (DEBUG):* with a power-zoom lens mounted, fire `02 44/45 10/20` candidates from the probe panel,
+   then the `6A–6D` group; note which group zooms vs racks focus and which step byte is which direction — update
+   docs/03's 🔴 section with first-party values.
+**Pass:** 1–5 & 7 behave as described with no write errors; 8 resolves the zoom/MF dispute.
+
 ## IT-9 — GPS accuracy *(Rig B — iPhone)*
 
 On the iPhone (GNSS), verify pushed coordinates match ground truth (spot-check a frame's embedded GPS against a known

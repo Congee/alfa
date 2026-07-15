@@ -89,10 +89,21 @@ The core of the project. Deliver GPS + time sync **and** the "good BLE citizen" 
 
 Mirror Alpha Remote Controller's core over the Remote Control service (`8000FF00`).
 
-- [ ] `SonyBLE` remote command path: shutter (half → full → release), AF-ON, C1, record; `FF02` status notifications.
-- [ ] Reliable capture sequence (half-press → focus-ack → full-press → release).
-- [ ] **Sniff/verify** the low-confidence zoom vs. manual-focus opcodes on the A7R V (see `03-ble-protocol.md`).
-- [ ] Remote UI (foreground), signal strength, camera state indicators.
+- [x] `SonyBLE` remote command path (2026-07-15): `CameraLink` discovers + writes `FF01` behind the same
+      ack-gated-handshake gate as location writes; typed `LinkEvent`s for FF02/CC05; command acks/failures surfaced.
+- [x] Reliable capture sequence: pure `RemoteControlEngine` (sibling of the geotag reducer, 19 host tests) owns
+      half → focus-ack/timeout → full → shutter-active → release-through, generation-tagged timeouts,
+      `02 C3 00`/write-failure/disconnect aborts; **structurally connection-free** (its action type cannot express
+      a connect). Verified end-to-end over the radio (harness `capture` scenario). Focus-ack timeout *escalates*
+      (MF-lens support — the camera's release priority stays the authority); record is tap-only (wire toggle).
+- [~] **Sniff/verify** the low-confidence zoom vs. manual-focus opcodes on the A7R V: DEBUG probe panel shipped
+      (fires the disputed `[02 group step]` candidates through the gated FF01 path; results in the device log) —
+      the live verification pass is owed (`docs/08` IT-15).
+- [x] Remote UI (foreground): Remote tab as a camera-body control surface — α-ring shutter (tap = auto sequence /
+      hold = half; two-stage S1/S2 zones, bulb-capable), AF-ON/C1 press-hold-lock, REC toggle, state banner
+      (Ready/Focusing/Exposing/Recording), EXP/REC elapsed + estimated long-exposure-NR countdown, RSSI signal bars
+      (polled only while the tab is visible). *Real-camera pass owed: `docs/08` IT-15 (incl. `02 D5` record codes,
+      not yet A7R V-verified).*
 
 ## Phase 3 — Advanced capture
 
