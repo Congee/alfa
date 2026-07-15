@@ -21,6 +21,12 @@ struct HomeView: View {
                     LabeledContent("Bluetooth", value: coordinator.bluetoothDescription)
                     LabeledContent("Location access", value: coordinator.locationAccessDescription)
                     LabeledContent("Fixes pushed", value: "\(coordinator.pushCount)")
+                    if let connects = coordinator.connectsDescription {
+                        LabeledContent("Connections", value: connects)
+                    }
+                    if let connectedTime = coordinator.connectedTimeDescription {
+                        LabeledContent("Time connected", value: connectedTime)
+                    }
                     if let fix = coordinator.lastFixDescription {
                         LabeledContent("Last fix", value: fix)
                             .font(.footnote.monospacedDigit())

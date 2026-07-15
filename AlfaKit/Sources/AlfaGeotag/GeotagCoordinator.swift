@@ -33,9 +33,13 @@ public final class GeotagCoordinator {
     /// Whether the user has finished first-run onboarding. Persisted.
     public private(set) var hasCompletedOnboarding: Bool
 
+    /// Connection diagnostics (reconnect counts, connected time) — persisted so they survive background relaunches.
+    private var stats: ConnectionStats
+
     private let central: CameraCentral
     private let location = LocationProvider()
     private let settingsStore: GeotagSettingsStore
+    private let statsStore: ConnectionStatsStore
     private let defaults: UserDefaults
     private let log = Logger(subsystem: "me.congee.alfa", category: "coordinator")
     private var minimumDistanceMeters: Double
@@ -67,9 +71,12 @@ public final class GeotagCoordinator {
 
     public init(
         settingsStore: GeotagSettingsStore = UserDefaultsGeotagSettingsStore(),
+        statsStore: ConnectionStatsStore = UserDefaultsConnectionStatsStore(),
         defaults: UserDefaults = .standard
     ) {
         self.settingsStore = settingsStore
+        self.statsStore = statsStore
+        stats = statsStore.load()
         self.defaults = defaults
         let loaded = settingsStore.load()
         settings = loaded
@@ -226,6 +233,8 @@ public final class GeotagCoordinator {
     /// disconnect and stop retrieving it. The next enable/sync scans for a camera afresh.
     public func forgetCamera() {
         cameraName = nil
+        stats = ConnectionStats() // diagnostics belong to the camera relationship being forgotten
+        statsStore.save(stats)
         Task { await central.forgetCamera() }
     }
 
@@ -261,6 +270,28 @@ public final class GeotagCoordinator {
             lastFix.horizontalAccuracyMeters
         )
     }
+
+    /// Connection-diagnostics rows (nil = nothing to show yet, row hidden). Backed by the persisted ``ConnectionStats``.
+    public var connectsDescription: String? {
+        guard stats.connects > 0 else { return nil }
+        return stats.backgroundConnects > 0
+            ? "\(stats.connects) (\(stats.backgroundConnects) in background)"
+            : "\(stats.connects)"
+    }
+
+    public var connectedTimeDescription: String? {
+        let seconds = stats.connectedSeconds(asOf: Date())
+        guard seconds >= 1 else { return nil }
+        return Self.durationFormatter.string(from: seconds)
+    }
+
+    private static let durationFormatter: DateComponentsFormatter = {
+        let formatter = DateComponentsFormatter()
+        formatter.allowedUnits = [.hour, .minute, .second]
+        formatter.unitsStyle = .abbreviated
+        formatter.maximumUnitCount = 2
+        return formatter
+    }()
 
     public var bluetoothDescription: String {
         switch bluetooth {
@@ -375,7 +406,18 @@ public final class GeotagCoordinator {
     private func handle(_ event: CameraEvent) {
         switch event {
         case let .stateChanged(state):
+            let previous = connection
             connection = state
+            // Connection diagnostics: count every arrival at `.connected` (background arrivals separately — the
+            // auto-resume proof) and accumulate connected time. Persisted per transition so a kill loses at most
+            // the open span's tail.
+            if state == .connected, previous != .connected {
+                stats.recordConnected(foreground: Self.isAppForeground, now: Date())
+                statsStore.save(stats)
+            } else if state != .connected, previous == .connected {
+                stats.recordNotConnected(now: Date())
+                statsStore.save(stats)
+            }
             // The heartbeat lives no longer than a live link; it is (re)armed by each push below, not here.
             if state != .connected { stopHeartbeat() }
             // Tie location delivery to the link. Connected (fresh connect, or standby → power-on) → continuous:
