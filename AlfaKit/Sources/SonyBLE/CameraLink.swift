@@ -16,6 +16,12 @@ enum LinkEvent: Sendable, Equatable {
     case connectFailed
     case disconnected
     case wroteLocation
+    /// Decoded `CC05` power/Wi-Fi state — the camera's proactive standby signal.
+    case cameraPowerState(CameraPowerState)
+    /// Decoded `FF02` remote status — the focus/shutter/record feed (Phase 1 consumes it listen-only;
+    /// Phase 2's capture sequencing keys off every transition).
+    case remoteStatus(SonyRemoteStatus)
+    /// Any other notify/read value (DD01 location-enabled flag, the CC10 probe, unknowns) — raw bytes, no decode.
     case notify(characteristic: String, value: [UInt8])
     case failure(String)
 }
@@ -223,10 +229,16 @@ final class CameraLink: NSObject, @unchecked Sendable {
             }
 
             // Politeness (docs/05 rule 2): adopt an already-connected peripheral instead of adding a redundant intent.
-            let connected = manager.retrieveConnectedPeripherals(withServices: [SonyCBUUID.locationService])
-            if let existing = connected.first {
-                adoptAndConnect(existing)
-                return
+            // Not in sim-test mode: this adoption bypasses the sim-only discovery gate, and a real camera that is
+            // system-connected (e.g. the dogfood app held it moments before the test host replaced it — bluetoothd
+            // keeps the ACL) would hijack the test, wait forever for scripted sim events, and fail it (field-observed
+            // 2026-07-15: the standby scenario adopted a live A7R V, which never sends CC05).
+            if !Self.testSimModeActive {
+                let connected = manager.retrieveConnectedPeripherals(withServices: [SonyCBUUID.locationService])
+                if let existing = connected.first {
+                    adoptAndConnect(existing)
+                    return
+                }
             }
 
             // Background auto-resume (opt-in) — decided entirely here in the background; a background scan can't surface
@@ -858,7 +870,15 @@ extension CameraLink: CBPeripheralDelegate {
             log.notice("standby: notification received — probing (possible power-on)")
             probeStandby()
         }
-        onEvent(.notify(characteristic: characteristic.uuid.uuidString, value: bytes))
+        // Decode the well-understood feeds here (the link already owns SonyProtocol); everything else stays raw.
+        switch characteristic.uuid {
+        case SonyCBUUID.cameraPowerState:
+            onEvent(.cameraPowerState(CameraPowerState(cc05: bytes)))
+        case SonyCBUUID.remoteStatus:
+            onEvent(.remoteStatus(SonyRemoteStatus(rawValue: bytes)))
+        default:
+            onEvent(.notify(characteristic: characteristic.uuid.uuidString, value: bytes))
+        }
     }
 
     func peripheral(

@@ -224,24 +224,26 @@ public actor CameraCentral {
             // `state.lastPushed` is the position this ack confirms — the UI's "what the camera has" (map marker).
             eventContinuation.yield(.locationPushed(count: pushCount, fix: state.lastPushed))
 
-        case let .notify(characteristic, value):
+        case let .cameraPowerState(power):
             // CC05 is the camera's power/standby signal: a confirmed power-off proactively tears down the link and
-            // backs off. (The DD01 location-enabled flag is still observed-only in Phase 1.)
-            if characteristic == SonyGATT.Characteristic.cameraPowerState,
-               CameraPowerState(cc05: value) == .off {
+            // backs off.
+            if power == .off {
                 apply(engine.reduce(&state, .cameraPoweredOff))
             }
+
+        case let .remoteStatus(status):
             // FF02 is the remote status feed: a focus acquisition (half-press) or a fired shutter pushes the freshest
             // position — "update location on focus". The shutter trigger is not redundant: a back-button-focus shot
             // has no shot-coupled AF activation, and such a real A7R V photo emitted only the shutter pair
             // (`02 A0 20/00`, docs/08 IT-13); it also freshens the fix for the next frames of a burst. The reducer
             // guards and throttles.
-            if characteristic == SonyGATT.Characteristic.remoteStatus, updateOnFocus {
-                let status = SonyRemoteStatus(rawValue: value)
-                if status == .focusAcquired || status == .pictureBeingTaken {
-                    apply(engine.reduce(&state, .captureActivity(now: Date())))
-                }
+            if updateOnFocus, status == .focusAcquired || status == .pictureBeingTaken {
+                apply(engine.reduce(&state, .captureActivity(now: Date())))
             }
+
+        case .notify:
+            // Raw feeds with no policy meaning yet (DD01 location-enabled flag, the CC10 probe) — logged at the link.
+            break
 
         case let .failure(message):
             eventContinuation.yield(.failure(message))
