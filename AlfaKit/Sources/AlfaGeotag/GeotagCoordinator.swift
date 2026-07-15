@@ -75,7 +75,8 @@ public final class GeotagCoordinator {
     public init(
         settingsStore: GeotagSettingsStore = UserDefaultsGeotagSettingsStore(),
         statsStore: ConnectionStatsStore = UserDefaultsConnectionStatsStore(),
-        defaults: UserDefaults = .standard
+        defaults: UserDefaults = .standard,
+        central: CameraCentral? = nil
     ) {
         self.settingsStore = settingsStore
         self.statsStore = statsStore
@@ -83,7 +84,10 @@ public final class GeotagCoordinator {
         self.defaults = defaults
         let loaded = settingsStore.load()
         settings = loaded
-        central = CameraCentral(policy: loaded.policy())
+        // An injected central (CameraSession shares one with the RemoteCoordinator) starts with the default policy;
+        // `applySettingsToCentral()` re-applies the persisted thresholds before every `start()`, so the loaded
+        // policy still lands before the first connect either way.
+        self.central = central ?? CameraCentral(policy: loaded.policy())
         minimumDistanceMeters = loaded.distanceMeters
         locationAuthorization = location.authorizationStatus.locationAuthorization
         hasCompletedOnboarding = defaults.bool(forKey: Self.onboardingKey)
@@ -413,7 +417,13 @@ public final class GeotagCoordinator {
         })
     }
 
+    /// Forwards every engine event to the sibling ``RemoteCoordinator`` (set by ``CameraSession``). The engine's
+    /// `AsyncStream` supports exactly one consumer — this loop — so the remote façade is fed by forwarding, not by
+    /// a second `for await` that would silently steal elements.
+    var remoteEventSink: (@MainActor (CameraEvent) -> Void)?
+
     private func handle(_ event: CameraEvent) {
+        remoteEventSink?(event)
         switch event {
         case let .stateChanged(state):
             let previous = connection
