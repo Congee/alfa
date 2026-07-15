@@ -35,6 +35,10 @@ public actor CameraCentral {
     private var remoteTimeouts: [RemoteTimeout.Kind: Task<Void, Never>] = [:]
     /// RSSI poll cadence for the remote UI's signal indicator — slow enough to be battery-irrelevant.
     private static let rssiPollIntervalSeconds: TimeInterval = 2
+    /// Whether the remote UI is on a lit screen. Mirrored (not just forwarded) because a poll started while
+    /// disconnected self-terminates at the link — a camera that connects *after* the Remote tab is already
+    /// visible needs the poll re-armed at the connect transition (see `apply`).
+    private var remoteUIVisible = false
 
     // Time-sync preferences (mirrored from `GeotagSettings`). `syncTimeZone` gates the DD11 tz/dst block;
     // `syncClock` gates the best-effort CC13 clock write on connect; `useGPSTime` sources that write from the
@@ -242,6 +246,7 @@ public actor CameraCentral {
     /// Starts/stops the RSSI poll for the remote UI's signal indicator — driven by the Remote tab's visibility,
     /// so an idle app never reads RSSI.
     public func setRemoteUIVisible(_ visible: Bool) {
+        remoteUIVisible = visible
         if visible {
             link?.startRSSIPolling(interval: Self.rssiPollIntervalSeconds)
         } else {
@@ -396,6 +401,11 @@ public actor CameraCentral {
             // Mirror the transition into the remote engine: leaving `.connected` resets its transient beliefs
             // (held buttons, in-flight sequences) so a reconnect never inherits a stale press.
             applyRemote(remoteEngine.reduce(&remoteState, .connectionChanged(state.connection)))
+            // Re-arm the visibility-driven RSSI poll for a connect that lands after the Remote tab is already on
+            // screen (the visibility edge fired while disconnected, where the link's poll self-terminates).
+            if state.connection == .connected, remoteUIVisible {
+                link?.startRSSIPolling(interval: Self.rssiPollIntervalSeconds)
+            }
         }
         for action in actions {
             switch action {

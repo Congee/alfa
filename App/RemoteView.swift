@@ -84,6 +84,9 @@ struct RemoteView: View {
             Text("Two-stage").tag(RemoteCoordinator.ShutterMode.twoStage)
         }
         .pickerStyle(.segmented)
+        // Switching modes mid-press swaps the gesture surface out from under the finger; the ShutterControl
+        // recovers safely (it cancels through the engine), but blocking the common case is kinder than recovering.
+        .disabled(remote.isShutterEngaged)
     }
 }
 
@@ -241,6 +244,21 @@ private struct ShutterControl: View {
         .scaleEffect(isPressed || remote.isShutterEngaged ? 0.97 : 1)
         .animation(.easeOut(duration: 0.1), value: isPressed)
         .sensoryFeedback(.impact(weight: .medium), trigger: fireCount)
+        .onChange(of: remote.shutterMode) { _, _ in
+            // Swapping tap/two-stage replaces the gesture surface's view identity: an in-flight touch is torn
+            // down as a *cancellation* (`.onEnded` never fires), so any press it started — or the pending hold
+            // timer about to start one — must be released here, or the engine strands in a held phase with a
+            // press already sent to the camera and no finger left to lift.
+            holdTask?.cancel()
+            holdTask = nil
+            if isPressed || halfHeld || ringHeld || centerHeld {
+                remote.shutterCancelled()
+            }
+            isPressed = false
+            halfHeld = false
+            ringHeld = false
+            centerHeld = false
+        }
         .accessibilityLabel(remote.shutterMode == .twoStage ? "Shutter, ring focuses, center fires" : "Shutter")
     }
 
