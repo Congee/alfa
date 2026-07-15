@@ -358,14 +358,18 @@ until focus locks; separately, take a photo.
 events arrive (or `02 C3 00`), and geotagging is unaffected.
 **Pass:** AF/shutter → immediate push, throttled; no writes and no errors with the setting off.
 
-**Partial result 2026-07-15 (shutter half ✅):** a real photo taken with **back-button focus and no AF-button press**
-produced `notify FF02 = 02 A0 20` → `02 A0 00` on the live link — the FF02 feed works on the real body (its remote
-setting was on), and the shutter pair is first-party-verified. No `3F` event appeared, which is *expected* for a shot
-with no AF activation — that observation is why the shutter codes became a push trigger alongside focus (a
-back-button-focus shooter may never emit a shot-coupled focus event). **Still open (focus half):** repeat with an
-actual AF activation — AF-ON press or half-press until lock — and confirm `02 3F 20` + immediate push on this body.
-*(The FF02 → push mechanics for both triggers are pre-verified over the real radio by the harness `focus` scenario
-below; this test pins the real body's behavior and the camera-side setting.)*
+**✅ PASS — both halves field-verified 2026-07-15 (A7R V fw 4.0, back-button-focus shooter):**
+- *Shutter:* a photo with **no AF-button press** produced only `02 A0 20` → `02 A0 00` — no `3F` event, as expected
+  with no shot-coupled AF activation. This observation is why the shutter codes became a push trigger alongside
+  focus (a back-button-focus shooter may never emit a shot-coupled focus event).
+- *Focus:* a genuine **AF-ON acquisition** produced `notify FF02 = 02 3F 20` → `location push` → `location write
+  acked` 65 ms later, then `02 3F 00` on release.
+- *Throttle:* the shot fired 1.7 s after the focus push and its `02 A0 20` correctly produced **no** second write
+  (inside the 2 s capture throttle) — the exposure carried the fresh focus-push fix.
+- Same session: lever-on relaunched the app in the background (state restoration), boot-window re-discovery →
+  ready → first push ~2 s after power-on; lever-off re-armed the standing connect.
+*(The FF02 → push mechanics for both triggers are also covered on every harness run by the `focus` scenario below;
+this test pinned the real body's behavior and the camera-side setting.)*
 
 ## IT-9 — GPS accuracy *(Rig B — iPhone)*
 

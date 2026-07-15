@@ -65,9 +65,11 @@ The core of the project. Deliver GPS + time sync **and** the "good BLE citizen" 
 - [x] Geotag Alpha parity sweep (2026-07-15, from the GA site + changelog):
       **Update on focus** — `CameraLink` subscribes to the `FF02` remote-status feed (listen-only; `FF01` commands
       stay Phase 2) and a focus acquisition (`02 3F 20`, 5-project corroboration) pushes the freshest position
-      immediately, bypassing the distance/interval gates behind a 2 s throttle (`GeotagInput.focusAcquired`,
+      immediately, as does a fired shutter (`02 A0 20`, ✅ first-party — a back-button-focus shot emits no focus
+      event at all), bypassing the distance/interval gates behind a 2 s throttle (`GeotagInput.captureActivity`,
       host-tested; sim scenario `focus` in the two-radio harness). Requires the camera's Bluetooth remote-control
-      setting for the camera to emit focus events (IT-13).
+      setting. **✅ IT-13 field-verified 2026-07-15**: real AF-ON → `02 3F 20` → acked push in 65 ms; the shot 1.7 s
+      later correctly throttled.
       **Use GPS time** — optional CC13 clock source from the GNSS fix's timestamp (fresh-fix-gated, deferred write).
       **Connection diagnostics** — persisted reconnect counts (background tallied separately) + time connected, on
       Home.

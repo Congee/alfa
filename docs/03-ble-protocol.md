@@ -104,8 +104,8 @@ alpha-gps, camera-gps-link, swremote, CameraSync docs):
 
 | Bytes | Meaning | Agreement |
 |-------|---------|-----------|
-| `02 3F 00` | focus lost / ready | 4 projects |
-| `02 3F 20` | focus acquired | **5 projects** |
+| `02 3F 00` | focus lost / ready | 4 projects **+ ✅ observed on A7R V fw 4.0 (2026-07-15)** |
+| `02 3F 20` | focus acquired | **5 projects + ✅ observed on A7R V fw 4.0 (2026-07-15)** |
 | `02 3F 40` | focus busy | 1 (swremote only) 🟡 |
 | `02 A0 00` | shutter ready / back from picture | 5 projects **+ ✅ observed on A7R V fw 4.0 (2026-07-15)** |
 | `02 A0 20` | picture being taken | 5 projects **+ ✅ observed on A7R V fw 4.0 (2026-07-15)** |
@@ -115,10 +115,11 @@ alpha-gps, camera-gps-link, swremote, CameraSync docs):
 
 **Implemented (Phase 1, listen-only):** `CameraLink` subscribes to `FF02`, and `02 3F 20` (focus acquired) **or**
 `02 A0 20` (shutter fired) triggers an immediate fresh-position push — "update location on focus"
-(`GeotagInput.captureActivity`, throttled). The shutter trigger is grounded in first-party evidence: a real A7R V
-photo taken with **back-button focus** (no half-press, so no shot-coupled AF activation) emitted only
-`02 A0 20` → `02 A0 00` — no `3F` event at all (device log 2026-07-15; whether an actual AF activation emits `3F 20`
-on this body is still IT-13's open question). Nothing is ever written to `FF01` in Phase 1; subscribing is safe
+(`GeotagInput.captureActivity`, throttled). Both triggers are first-party-verified on the A7R V (device logs
+2026-07-15, docs/08 IT-13): a photo taken with **back-button focus** and no AF activation emitted only
+`02 A0 20` → `02 A0 00` (hence the shutter trigger — such a shot produces no `3F` event at all), and a genuine AF-ON
+acquisition emitted `02 3F 20` → immediate acked push, with the shutter event 1.7 s later correctly swallowed by the
+2 s capture throttle. Nothing is ever written to `FF01` in Phase 1; subscribing is safe
 whatever the camera-side remote setting (off ⇒ silence or `02 C3 00`). DD (location) + FF (remote status)
 demonstrably coexist on one link (alpha-gps and camera-gps-link both do it, and the same A7R V log shows DD11 writes
 acked alongside FF02 notifies).
