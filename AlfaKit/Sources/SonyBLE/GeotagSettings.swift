@@ -14,6 +14,10 @@ public struct GeotagSettings: Sendable, Equatable, Codable {
     /// Source the CC13 clock write from the latest GNSS fix's timestamp instead of the device clock. Only a fresh
     /// fix is used (a stale timestamp would set the camera slow); until one arrives the write is deferred.
     public var useGPSTime: Bool
+    /// Push the freshest position the instant the camera acquires focus (FF02 half-press status), so the shot about
+    /// to be taken carries the most accurate location. Listen-only on the camera's remote-status feed; requires the
+    /// camera's Bluetooth remote-control setting to be on for the camera to send focus events.
+    public var updateOnFocus: Bool
     /// Hold a standing `connect()` after a dropped link so iOS auto-reconnects the camera on its next power-on — even
     /// with the app in the background (state restoration relaunches Alfa to service it). A camera that goes silent
     /// when off ("Cnct. while Power OFF" = Off — the proven, Geotag-Alpha-parity configuration) makes the wait free by
@@ -29,6 +33,7 @@ public struct GeotagSettings: Sendable, Equatable, Codable {
         syncClock: Bool = true,
         syncTimeZone: Bool = true,
         useGPSTime: Bool = false,
+        updateOnFocus: Bool = true,
         backgroundResume: Bool = true
     ) {
         self.distanceMeters = distanceMeters
@@ -36,6 +41,7 @@ public struct GeotagSettings: Sendable, Equatable, Codable {
         self.syncClock = syncClock
         self.syncTimeZone = syncTimeZone
         self.useGPSTime = useGPSTime
+        self.updateOnFocus = updateOnFocus
         self.backgroundResume = backgroundResume
     }
 
@@ -50,6 +56,7 @@ public struct GeotagSettings: Sendable, Equatable, Codable {
         syncClock = try container.decodeIfPresent(Bool.self, forKey: .syncClock) ?? defaults.syncClock
         syncTimeZone = try container.decodeIfPresent(Bool.self, forKey: .syncTimeZone) ?? defaults.syncTimeZone
         useGPSTime = try container.decodeIfPresent(Bool.self, forKey: .useGPSTime) ?? defaults.useGPSTime
+        updateOnFocus = try container.decodeIfPresent(Bool.self, forKey: .updateOnFocus) ?? defaults.updateOnFocus
         backgroundResume = try container.decodeIfPresent(Bool.self, forKey: .backgroundResume)
             ?? defaults.backgroundResume
     }

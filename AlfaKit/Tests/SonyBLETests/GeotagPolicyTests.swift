@@ -327,4 +327,56 @@ struct GeotagPolicyTests {
         #expect(actions.isEmpty)
         #expect(state.connection == .connected)
     }
+
+    // MARK: - Update on focus
+
+    @Test("Focus pushes the freshest position, restamped, bypassing the distance gate")
+    func focusPushesLatestBypassingGates() {
+        var state = connectedState(engine, latest: fix(1, 1, at: 0))
+        // A nearby sample (below the 25 m gate) arrives and is *not* pushed…
+        let nearby = fix(1.00001, 1, at: 10) // ~1.1 m away
+        #expect(engine.reduce(&state, .location(nearby)).isEmpty)
+        // …but a half-press pushes exactly that freshest position, restamped to the focus moment.
+        let actions = engine.reduce(&state, .focusAcquired(now: Date(timeIntervalSince1970: 12)))
+        let expected = LocationFix(
+            latitude: nearby.latitude,
+            longitude: nearby.longitude,
+            timestamp: Date(timeIntervalSince1970: 12),
+            horizontalAccuracyMeters: nearby.horizontalAccuracyMeters
+        )
+        #expect(actions == [.pushLocation(expected)])
+        #expect(state.lastPushed == expected) // the movement gate now measures from what the camera has
+    }
+
+    @Test("Focus pushes bypass the interval throttle too")
+    func focusBypassesIntervalThrottle() {
+        let engine = intervalEngine // 30 s minimum between position pushes
+        var state = connectedState(engine, latest: fix(1, 1, at: 0))
+        _ = engine.reduce(&state, .location(fix(2, 2, at: 5))) // moved far but inside the interval → not pushed
+        let actions = engine.reduce(&state, .focusAcquired(now: Date(timeIntervalSince1970: 6)))
+        #expect(actions.count == 1) // the half-press still delivers the fresh position
+    }
+
+    @Test("Rapid focus re-acquisitions are throttled; spaced ones push again")
+    func focusPushesAreThrottled() {
+        var state = connectedState(engine, latest: fix(1, 1, at: 0))
+        #expect(engine.reduce(&state, .focusAcquired(now: Date(timeIntervalSince1970: 10))).count == 1)
+        // Continuous AF re-acquires 0.5 s later — inside the focus throttle, no second write.
+        #expect(engine.reduce(&state, .focusAcquired(now: Date(timeIntervalSince1970: 10.5))).isEmpty)
+        // The next distinct half-press, past the throttle, pushes again.
+        #expect(engine.reduce(&state, .focusAcquired(now: Date(timeIntervalSince1970: 13))).count == 1)
+    }
+
+    @Test("Focus never writes while not connected or without a sample")
+    func focusGuards() {
+        // Standby (dormant held link): a write would churn the powered-off camera.
+        var standby = enabledAndConnected()
+        standby.latest = fix(1, 1)
+        _ = engine.reduce(&standby, .cameraStandby)
+        #expect(engine.reduce(&standby, .focusAcquired(now: Date(timeIntervalSince1970: 5))).isEmpty)
+        // Connected but no location sample yet: nothing to push.
+        var noSample = enabledAndConnected()
+        #expect(noSample.latest == nil)
+        #expect(engine.reduce(&noSample, .focusAcquired(now: Date(timeIntervalSince1970: 5))).isEmpty)
+    }
 }

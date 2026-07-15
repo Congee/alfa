@@ -21,6 +21,9 @@ public struct GeotagState: Sendable, Equatable {
     /// Wall-clock of the **last write of any kind** (a real position push *or* a keep-alive re-push) — the reference for
     /// the expiry/keep-alive check. Distinct from `lastPushed.timestamp` so keep-alives don't disturb the interval gate.
     public var lastWriteAt: Date?
+    /// Wall-clock of the last focus-triggered push — the reference for the focus-push throttle (continuous AF can
+    /// re-acquire focus several times a second).
+    public var lastFocusPushAt: Date?
 
     public init() {}
 }
@@ -49,6 +52,10 @@ public enum GeotagInput: Sendable, Equatable {
     /// BLE characteristic (`docs/03`, `docs/08`), so it can only be *prevented*, not reacted to. Carries `now` to keep
     /// the reducer pure and deterministic.
     case heartbeat(now: Date)
+    /// The camera acquired focus (half-press; FF02 `02 3F 20`): push the freshest position immediately so the shot
+    /// carries the most accurate location — Geotag Alpha's "update location on focus". Bypasses the distance/interval
+    /// gates (throttled by ``GeotagPolicyEngine/focusPushMinInterval`` instead). Carries `now` to stay pure.
+    case focusAcquired(now: Date)
     /// An explicit, low-frequency user trigger (e.g. "Sync now") — the only sanctioned way out of back-off.
     case syncRequested
 }
@@ -192,10 +199,37 @@ public struct GeotagPolicyEngine: Sendable {
             state.lastWriteAt = now
             return [.pushLocation(refreshed)]
 
+        case let .focusAcquired(now):
+            // Focus-triggered push: the shot about to be taken should carry the freshest position, so the movement
+            // and interval gates are bypassed. Guarded like every write — only while genuinely connected, only with
+            // a sample in hand — and throttled so continuous-AF re-acquisitions can't spam the link. The position is
+            // restamped to `now` (like a keep-alive) so the camera never sees a time-regressive packet after a
+            // heartbeat, and it becomes the pushed reference the movement gate measures from.
+            guard state.connection == .connected, let fix = state.latest else { return [] }
+            if let lastFocusPushAt = state.lastFocusPushAt,
+               now.timeIntervalSince(lastFocusPushAt) < Self.focusPushMinInterval {
+                return []
+            }
+            let atFocus = LocationFix(
+                latitude: fix.latitude,
+                longitude: fix.longitude,
+                timestamp: now,
+                horizontalAccuracyMeters: fix.horizontalAccuracyMeters
+            )
+            state.lastFocusPushAt = now
+            state.lastPushed = atFocus
+            state.lastWriteAt = now
+            return [.pushLocation(atFocus)]
+
         case .syncRequested:
             return begin(&state, manual: true)
         }
     }
+
+    /// Minimum spacing between focus-triggered pushes. Half-press events arrive per AF acquisition — continuous AF
+    /// can fire several per second — and each push is a radio write, so they are rate-limited independently of the
+    /// user-facing interval setting (which they deliberately bypass).
+    public static let focusPushMinInterval: TimeInterval = 2
 
     /// Whether the camera's fix would go stale by `now` — i.e. the keep-alive window has elapsed since the last write.
     /// `false` when the keep-alive is disabled or nothing has been written yet.

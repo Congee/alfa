@@ -21,11 +21,14 @@ struct SettingsView: View {
                             Text(interval == 0 ? "Off" : "\(Int(interval)) s").tag(interval)
                         }
                     }
+                    Toggle("Update on focus", isOn: focusBinding)
                 } header: {
                     Text("Updates")
                 } footer: {
                     Text("Location is sent only after you move at least this far, and no more often than the "
-                        + "interval. Larger values save battery.")
+                        + "interval. Larger values save battery. Update on focus additionally pushes the freshest "
+                        + "location the instant the camera focuses (half-press), so each shot gets the most accurate "
+                        + "tag — the camera sends focus events only with its Bluetooth remote-control setting on.")
                 }
 
                 Section {
@@ -93,6 +96,10 @@ struct SettingsView: View {
 
     private var gpsTimeBinding: Binding<Bool> {
         Binding(get: { coordinator.useGPSTime }, set: { coordinator.setUseGPSTime($0) })
+    }
+
+    private var focusBinding: Binding<Bool> {
+        Binding(get: { coordinator.updateOnFocus }, set: { coordinator.setUpdateOnFocus($0) })
     }
 
     private var backgroundResumeBinding: Binding<Bool> {

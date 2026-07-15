@@ -60,8 +60,17 @@ The core of the project. Deliver GPS + time sync **and** the "good BLE citizen" 
       (confirmation dialog). *TODO: multi-camera list, camera battery if reported.*
 - [x] Settings + time sync: customisable update distance + interval (persisted, `GeotagSettings`); Time Correction
       (CC13 clock write — ✅ A7R V-verified, IT-4) + Time Area Correction (tz/dst block) toggles; in-app Help/Troubleshooting +
-      compatibility. *(feature parity with Geotag Alpha's Phase-1 geotag surface; multi-camera + update-on-focus
-      remain deferred — see D3/OQ4 and Phase 2.)*
+      compatibility. *(feature parity with Geotag Alpha's Phase-1 geotag surface; multi-camera
+      remains deferred — see D3/OQ4.)*
+- [x] Geotag Alpha parity sweep (2026-07-15, from the GA site + changelog):
+      **Update on focus** — `CameraLink` subscribes to the `FF02` remote-status feed (listen-only; `FF01` commands
+      stay Phase 2) and a focus acquisition (`02 3F 20`, 5-project corroboration) pushes the freshest position
+      immediately, bypassing the distance/interval gates behind a 2 s throttle (`GeotagInput.focusAcquired`,
+      host-tested; sim scenario `focus` in the two-radio harness). Requires the camera's Bluetooth remote-control
+      setting for the camera to emit focus events (IT-13).
+      **Use GPS time** — optional CC13 clock source from the GNSS fix's timestamp (fresh-fix-gated, deferred write).
+      **Connection diagnostics** — persisted reconnect counts (background tallied separately) + time connected, on
+      Home. *Camera battery display investigated and parked: no verified BLE path exists (docs/03).*
 - [~] On-device validation on A7R V fw 4.0 (`08-integration-testing.md`): **IT-2 pair ✅**, **IT-4 CC13 clock ✅
       verified** (local-wall-clock interpretation correct — no UTC flip needed), **IT-12b background power-cycle
       reconnect ✅ field-verified (2026-07-15)** — lever off → on with the app backgrounded re-links and resumes

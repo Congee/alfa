@@ -24,10 +24,13 @@ is compiled out of release builds and inert unless the env var is set.
 ## Pieces
 
 - **`AlfaCameraSim`** (`AlfaKit/Sources/AlfaCameraSim`) — mock A7R V peripheral. Serves the location service
-  (`DD11`/`DD30`/`DD31`/`DD01`/`DD21`) and camera-control service (`CC05`/`CC13`), decodes and logs `DD11` writes, and
-  drives autonomous scenarios via `ALFA_SIM_SCRIPT`:
-  - `none` (default) — a plain long-running GATT mock (also takes stdin: `standby` / `wake` / `status` / `quit`).
+  (`DD11`/`DD30`/`DD31`/`DD01`/`DD21`), camera-control service (`CC05`/`CC13`), and remote-control service (`FF02`
+  notify), decodes and logs `DD11` writes, and drives autonomous scenarios via `ALFA_SIM_SCRIPT`:
+  - `none` (default) — a plain long-running GATT mock (also takes stdin: `standby` / `wake` / `focus` / `status` /
+    `quit`).
   - `standby` — sends a `CC05` power-off notification ~2 s after the first location write.
+  - `focus` — sends an `FF02` focus-acquired notification (`02 3F 20`, then the release) ~2 s after the first
+    location write.
 - **`Tests/AlfaIntegrationTests/BLEIntegrationTests.swift`** — on-device XCTest, hosted by the Alfa app (so it inherits
   the app's Bluetooth entitlement, usage strings, and existing permission grant). Drives the real `CameraCentral` and
   asserts. Skipped unless `ALFA_RUN_BLE_IT=1`.
@@ -37,7 +40,7 @@ is compiled out of release builds and inert unless the env var is set.
 ## Running
 
 ```sh
-Tools/ble-integration/on-device-it.sh          # builds, then runs both scenarios; prints PASS/FAIL
+Tools/ble-integration/on-device-it.sh          # builds, then runs all scenarios; prints PASS/FAIL
 ```
 
 The device UDID defaults to the paired iPad; override with `ALFA_DEVICE_UDID`. To drive by hand, run the sim in one
@@ -50,6 +53,7 @@ in another (see the script for the exact invocation and the `.xctestrun` env inj
 |-----------|-----------|--------------------------------------------------------------------------------|--------|
 | `connect` | `none`    | discover → bond (notify-subscribe) → fw handshake (DD30/DD31) → DD11 push       | ✅ PASS |
 | `standby` | `standby` | `CC05` off notification → engine backs off (no standing connect, no reconnect)  | ✅ PASS |
+| `focus`   | `focus`   | `FF02` focus-acquired → immediate DD11 push while stationary (gates bypassed)   | ✅ PASS |
 
 ## Known limitation: a hard power-off (reconnect) can't be emulated from a macOS peripheral
 

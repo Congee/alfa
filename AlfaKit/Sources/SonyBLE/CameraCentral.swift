@@ -16,6 +16,8 @@ public actor CameraCentral {
 
     private var engine: GeotagPolicyEngine
     private let bondedStore: BondedCameraStore
+    /// Passed through to `CameraLink`; `nil` opts this central out of CoreBluetooth state restoration (see there).
+    private let restoreIdentifier: String?
     private var state = GeotagState()
     private var link: CameraLink?
     private var pushCount = 0
@@ -34,6 +36,9 @@ public actor CameraCentral {
     private var pendingGPSClockSync = false
     /// A fix older than this is unusable as a clock source — writing its timestamp would set the camera slow.
     private static let gpsClockFreshnessSeconds: TimeInterval = 10
+    // Mirrored from `GeotagSettings.updateOnFocus`: a focus acquisition (FF02) triggers an immediate fresh-position
+    // push. The link subscribes to FF02 regardless (listen-only, no cost); this flag gates only the reaction.
+    private var updateOnFocus = true
     // Mirrored from `GeotagSettings.backgroundResume`: hold a standing connect on a dropped link for background
     // auto-resume. Stored here so it survives a `link` recreation (re-applied in `start()`).
     private var backgroundResume = false
@@ -53,10 +58,12 @@ public actor CameraCentral {
 
     public init(
         policy: ConnectionPolicy = .balanced,
-        bondedStore: BondedCameraStore = UserDefaultsBondedCameraStore()
+        bondedStore: BondedCameraStore = UserDefaultsBondedCameraStore(),
+        restoreIdentifier: String? = "me.congee.alfa.central"
     ) {
         self.policy = policy
         self.bondedStore = bondedStore
+        self.restoreIdentifier = restoreIdentifier
         engine = GeotagPolicyEngine(config: policy)
         (events, eventContinuation) = AsyncStream.makeStream(of: CameraEvent.self)
         (linkEvents, linkEventContinuation) = AsyncStream.makeStream(of: LinkEvent.self)
@@ -70,7 +77,7 @@ public actor CameraCentral {
         let continuation = linkEventContinuation
         let remembered = bondedStore.load()
         let newLink = CameraLink(
-            restoreIdentifier: "me.congee.alfa.central",
+            restoreIdentifier: restoreIdentifier,
             knownIdentifier: remembered?.id, // re-adopt the remembered camera without a fresh scan
             onEvent: { continuation.yield($0) }
         )
@@ -147,6 +154,12 @@ public actor CameraCentral {
         useGPSTime = gpsTime
     }
 
+    /// Toggles "update location on focus": whether a camera focus acquisition (FF02 half-press status) triggers an
+    /// immediate fresh-position push. See ``GeotagSettings/updateOnFocus``.
+    public func setUpdateOnFocus(_ enabled: Bool) {
+        updateOnFocus = enabled
+    }
+
     /// Toggles background auto-resume (a standing connect on a dropped link vs. the conservative scan-and-gate). See
     /// ``GeotagSettings/backgroundResume``. Applies to the *next* dropped link; a live link is untouched.
     public func setBackgroundResume(_ enabled: Bool) {
@@ -216,6 +229,13 @@ public actor CameraCentral {
             if characteristic == SonyGATT.Characteristic.cameraPowerState,
                CameraPowerState(cc05: value) == .off {
                 apply(engine.reduce(&state, .cameraPoweredOff))
+            }
+            // FF02 is the remote status feed: a focus acquisition (half-press) pushes the freshest position so the
+            // shot about to be taken carries it — "update location on focus". The reducer guards and throttles.
+            if characteristic == SonyGATT.Characteristic.remoteStatus,
+               updateOnFocus,
+               SonyRemoteStatus(rawValue: value) == .focusAcquired {
+                apply(engine.reduce(&state, .focusAcquired(now: Date())))
             }
 
         case let .failure(message):

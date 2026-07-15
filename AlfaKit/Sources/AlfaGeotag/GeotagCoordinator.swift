@@ -218,6 +218,7 @@ public final class GeotagCoordinator {
             gpsTime: settings.useGPSTime
         )
         await central.setBackgroundResume(settings.backgroundResume)
+        await central.setUpdateOnFocus(settings.updateOnFocus)
     }
 
     /// Escalates location permission one step toward Always when geotagging is enabled outside the guided flow.
@@ -340,6 +341,7 @@ public final class GeotagCoordinator {
     public var syncClock: Bool { settings.syncClock }
     public var syncTimeZone: Bool { settings.syncTimeZone }
     public var useGPSTime: Bool { settings.useGPSTime }
+    public var updateOnFocus: Bool { settings.updateOnFocus }
     public var backgroundResume: Bool { settings.backgroundResume }
 
     public func setDistanceMeters(_ meters: Double) {
@@ -360,6 +362,10 @@ public final class GeotagCoordinator {
 
     public func setUseGPSTime(_ on: Bool) {
         var updated = settings; updated.useGPSTime = on; updateSettings(updated)
+    }
+
+    public func setUpdateOnFocus(_ on: Bool) {
+        var updated = settings; updated.updateOnFocus = on; updateSettings(updated)
     }
 
     public func setBackgroundResume(_ on: Bool) {

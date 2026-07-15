@@ -97,21 +97,31 @@ full-press → wait for shutter-active → release. Wrong ordering can lock the 
 3-byte writes `[0x02, opcode, step]` with opcodes in the `44/45/46/47` and `6A/6B/6C/6D` groups, step `0x10` or `0x20`.
 **Sources disagree** on which group is zoom vs. focus and on the step byte. **Do not trust — sniff the A7R V in Phase 2.**
 
-### Status notifications (`FF02`) 🟡
+### Status notifications (`FF02`) ✅ (cross-referenced 2026-07-15)
 
-| Bytes | Meaning |
-|-------|---------|
-| `02 3F 00` | focus lost / ready |
-| `02 3F 20` | focus acquired |
-| `02 3F 40` | focus busy (single-source) |
-| `02 A0 00` | shutter ready / back from picture |
-| `02 A0 20` | picture being taken |
-| `02 D5 00` | recording stopped |
-| `02 D5 20` | recording started |
-| `02 C3 00` | remote feature inactive on camera (single-source) |
+All payloads are 3 bytes `[0x02, category, value]`. Corroboration re-verified across the OSS ecosystem (freemote,
+alpha-gps, camera-gps-link, swremote, CameraSync docs):
 
-To detect the user enabling "Bluetooth Rmt Ctrl" at runtime, alpha-gps sends a harmless half-shutter-release (`01 06`)
-every ~3 s while the feature reads inactive. Remote-service protocol errors return GATT status `0x0185`. 🟡
+| Bytes | Meaning | Agreement |
+|-------|---------|-----------|
+| `02 3F 00` | focus lost / ready | 4 projects |
+| `02 3F 20` | focus acquired | **5 projects** |
+| `02 3F 40` | focus busy | 1 (swremote only) 🟡 |
+| `02 A0 00` | shutter ready / back from picture | 5 projects |
+| `02 A0 20` | picture being taken | 5 projects |
+| `02 D5 00` | recording stopped | 4 projects |
+| `02 D5 20` | recording started | 3 projects |
+| `02 C3 00` | remote feature inactive on camera | 2 implementations + 1 doc |
+
+**Implemented (Phase 1, listen-only):** `CameraLink` subscribes to `FF02` and `02 3F 20` triggers an immediate
+fresh-position push — "update location on focus" (`GeotagInput.focusAcquired`, throttled). Nothing is ever written to
+`FF01` in Phase 1; subscribing is safe whatever the camera-side remote setting (off ⇒ silence or `02 C3 00`). DD
+(location) + FF (remote status) demonstrably coexist on one link (alpha-gps and camera-gps-link both do it).
+
+To detect the user enabling "Bluetooth Rmt Ctrl" at runtime, alpha-gps and camera-gps-link both send a harmless
+half-shutter-release (`01 06`) as a probe (~3 s / 250 ms cadences) while the feature reads inactive — any `FF02`
+payload other than `02 C3 00` means active. Alfa deliberately does not probe (listen-only). Remote-service protocol
+errors return GATT status `0x0185`. 🟡
 
 ## Camera Control service `8000CC00` 🟡
 
@@ -124,6 +134,13 @@ every ~3 s while the feature reads inactive. Remote-service protocol errors retu
 
 Not required for Phase 1's core, but `CC05` power-state observation is useful for the "camera is on/off" signal that
 drives the Balanced battery policy.
+
+**Camera battery over BLE: 🔴 effectively unknown (surveyed 2026-07-15).** No working OSS project reads it — the
+standard Battery Service `0x180F`/`0x2A19` appears nowhere across the ecosystem, and the sole lead is `CC10`
+("Battery Information", Read+Notify, with a detailed byte layout) documented **only** in CameraSync's docs folder,
+backed by zero code there and absent from the primary RE blogs it cites — treat as unverified and possibly
+synthesized. Sony's own apps likely read battery over the Wi-Fi/PTP-IP handoff instead. If pursued: probe `CC10` on
+the real A7R V and log raw bytes before building anything on it.
 
 **`CC13` — implemented and ✅ verified on the A7R V (fw 4.0).** `SonyTimePacket` (`SonyProtocol/TimePacket.swift`)
 encodes this layout and the BLE layer writes it best-effort on connect when the "Time Correction" setting is on and

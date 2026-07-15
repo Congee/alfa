@@ -10,6 +10,7 @@
 #
 #   connect  -> testConnectsHandshakesAndPushesLocation  (sim: none)     discover / bond / handshake / DD11 push
 #   standby  -> testBacksOffOnCameraStandby              (sim: standby)  CC05 off -> engine backs off (no churn)
+#   focus    -> testFocusTriggersImmediatePush           (sim: focus)    FF02 focus-acquired -> immediate DD11 push
 #
 # Usage:  Tools/ble-integration/on-device-it.sh
 # Env:    ALFA_DEVICE_UDID (default the paired iPad), ALFA_SIM_EXPIRY_SECONDS.
@@ -50,14 +51,15 @@ run_scenario() {  # <sim-mode> <test-method>
   xcodebuild test-without-building -xctestrun "$XCTESTRUN" -destination "platform=iOS,id=$DEVICE" \
     -only-testing:"AlfaIntegrationTests/BLEIntegrationTests/$test" 2>&1 \
     | grep -E '\[IT\]|Test Case|passed|failed|TEST EXECUTE'
-  local status=${pipestatus[1]}
+  local rc=${pipestatus[1]}   # NB: not `status` — that's a read-only zsh special ($?)
   cleanup
-  return $status
+  return $rc
 }
 
 fail=0
 run_scenario none    testConnectsHandshakesAndPushesLocation || fail=1
 run_scenario standby testBacksOffOnCameraStandby             || fail=1
+run_scenario focus   testFocusTriggersImmediatePush          || fail=1
 echo "==========================================="
 [[ $fail -eq 0 ]] && echo "ALL ON-DEVICE INTEGRATION TESTS PASSED" || echo "SOME ON-DEVICE INTEGRATION TESTS FAILED"
 exit $fail

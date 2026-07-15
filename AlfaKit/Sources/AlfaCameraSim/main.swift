@@ -71,6 +71,8 @@ final class CameraSim: NSObject, @unchecked Sendable {
 
     /// Held so CC05 notifications can be pushed to subscribed centrals.
     private var powerStateChar: CBMutableCharacteristic!
+    /// Held so FF02 remote-status notifications (focus/shutter) can be pushed to subscribed centrals.
+    private var remoteStatusChar: CBMutableCharacteristic!
 
     private var cameraAwake = true
 
@@ -81,8 +83,10 @@ final class CameraSim: NSObject, @unchecked Sendable {
 
     /// Autonomous scenario driver (`ALFA_SIM_SCRIPT`). `.standby` sends a CC05 power-off notification shortly after the
     /// first location write, so an on-device `xcodebuild test` deterministically observes the standby-bail path (the
-    /// engine backs off). `.none` leaves the sim a plain, long-running GATT mock driven by interactive stdin commands.
-    enum Script: String { case none, standby }
+    /// engine backs off). `.focus` sends an FF02 focus-acquired notification shortly after the first location write,
+    /// so the update-on-focus push path is observable the same way. `.none` leaves the sim a plain, long-running GATT
+    /// mock driven by interactive stdin commands.
+    enum Script: String { case none, standby, focus }
     private let script: Script
     private var scriptFired = false
 
@@ -139,7 +143,13 @@ final class CameraSim: NSObject, @unchecked Sendable {
         let cameraControlService = CBMutableService(type: SonyCBUUID.cameraControlService, primary: true)
         cameraControlService.characteristics = [powerStateChar, timeSyncChar]
 
-        return [locationService, cameraControlService]
+        remoteStatusChar = CBMutableCharacteristic(
+            type: SonyCBUUID.remoteStatus, properties: [.notify], value: nil, permissions: []
+        )
+        let remoteControlService = CBMutableService(type: SonyCBUUID.remoteControlService, primary: true)
+        remoteControlService.characteristics = [remoteStatusChar]
+
+        return [locationService, cameraControlService, remoteControlService]
     }
 
     private func powerStateBytes() -> [UInt8] {
@@ -180,6 +190,16 @@ final class CameraSim: NSObject, @unchecked Sendable {
         simLog("[SIM] CC05 notify -> \(awake ? "wake (on)" : "standby (off)")")
     }
 
+    /// Sends a half-press focus acquisition (FF02 `02 3F 20`) followed by the release (`02 3F 00`), like a real body.
+    private func sendFocusAcquired() {
+        manager.updateValue(Data([0x02, 0x3F, 0x20]), for: remoteStatusChar, onSubscribedCentrals: nil)
+        simLog("[SIM] FF02 notify -> focus acquired")
+        queue.asyncAfter(deadline: .now() + 0.5) { [self] in
+            manager.updateValue(Data([0x02, 0x3F, 0x00]), for: remoteStatusChar, onSubscribedCentrals: nil)
+            simLog("[SIM] FF02 notify -> focus released")
+        }
+    }
+
     func handleCommand(_ raw: String) {
         let command = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !command.isEmpty else { return }
@@ -189,6 +209,8 @@ final class CameraSim: NSObject, @unchecked Sendable {
                 sendPowerState(awake: false)
             case "wake":
                 sendPowerState(awake: true)
+            case "focus":
+                sendFocusAcquired()
             case "status":
                 simLog(
                     "[SIM] status cameraAwake=\(cameraAwake) "
@@ -205,11 +227,22 @@ final class CameraSim: NSObject, @unchecked Sendable {
 
     /// Runs the autonomous scenario after the first location write, once. Called on `queue` from `handleWrite`.
     private func runScriptIfNeeded() {
-        guard script == .standby, !scriptFired else { return }
-        scriptFired = true
-        simLog("[SIM] SCRIPT standby — sending CC05 power-off notify in 2s")
-        queue.asyncAfter(deadline: .now() + 2) { [weak self] in
-            self?.sendPowerState(awake: false)
+        guard !scriptFired else { return }
+        switch script {
+        case .none:
+            return
+        case .standby:
+            scriptFired = true
+            simLog("[SIM] SCRIPT standby — sending CC05 power-off notify in 2s")
+            queue.asyncAfter(deadline: .now() + 2) { [weak self] in
+                self?.sendPowerState(awake: false)
+            }
+        case .focus:
+            scriptFired = true
+            simLog("[SIM] SCRIPT focus — sending FF02 focus-acquired notify in 2s")
+            queue.asyncAfter(deadline: .now() + 2) { [weak self] in
+                self?.sendFocusAcquired()
+            }
         }
     }
 

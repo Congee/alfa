@@ -23,6 +23,14 @@ final class BLEIntegrationTests: XCTestCase {
         func clear() {}
     }
 
+    /// A central isolated from the host app's: an ephemeral bonded store, and **no restore identifier** — the tests
+    /// run inside the real Alfa app, and a second central sharing the app's restore ID would be handed (and, backing
+    /// off, *cancel*) the app's preserved standing connect from real field use instead of scanning for the sim.
+    /// Verified on-device 2026-07-15: exactly that made the connect scenario go `scanning → backedOff` in 20 µs.
+    private static func makeTestCentral() -> CameraCentral {
+        CameraCentral(bondedStore: EphemeralBondedStore(), restoreIdentifier: nil)
+    }
+
     private func requireIntegrationEnv() throws {
         try XCTSkipUnless(
             ProcessInfo.processInfo.environment["ALFA_RUN_BLE_IT"] == "1",
@@ -55,7 +63,7 @@ final class BLEIntegrationTests: XCTestCase {
     /// real radio: discovery → bond (notify-subscribe) → fw-gated handshake (DD30/DD31) → DD11 location push.
     func testConnectsHandshakesAndPushesLocation() async throws {
         try requireIntegrationEnv()
-        let central = CameraCentral(bondedStore: EphemeralBondedStore())
+        let central = Self.makeTestCentral()
 
         let connected = expectation(description: "connected to the mock camera")
         let pushed = expectation(description: "pushed a location (DD11 write acknowledged)")
@@ -68,7 +76,7 @@ final class BLEIntegrationTests: XCTestCase {
                     if state == .connected { connected.fulfill() }
                 case .locationPushed(let count):
                     NSLog("[IT] locationPushed(\(count))")
-                    if count >= 1 { pushed.fulfill() }
+                    if count == 1 { pushed.fulfill() } // exact: a second push must not over-fulfill (fatal in XCTest)
                 case .failure(let message):
                     NSLog("[IT] failure(\(message))")
                 default:
@@ -88,12 +96,70 @@ final class BLEIntegrationTests: XCTestCase {
         await central.stop()
     }
 
+    /// Feeds the **same** coordinate repeatedly, so after the on-connect push nothing clears the 25 m distance gate —
+    /// any further write within the test window can only come from another trigger (e.g. a focus push).
+    private func startFeedingStationary(_ central: CameraCentral) -> Task<Void, Never> {
+        Task {
+            while !Task.isCancelled {
+                let fix = LocationFix(
+                    latitude: 35.0, longitude: 139.0, timestamp: Date(), horizontalAccuracyMeters: 5
+                )
+                await central.submitLocation(fix)
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+            }
+        }
+    }
+
+    /// Requires the Mac sim in **`ALFA_SIM_SCRIPT=focus`** mode (it sends an FF02 focus-acquired notification shortly
+    /// after the first location write). Proves update-on-focus over the real radio: the half-press status triggers an
+    /// immediate second DD11 push even though the phone hasn't moved (the stationary feeder never clears the distance
+    /// gate, and the 45 s keep-alive can't fire inside the 20 s window — so push #2 can only be the focus push).
+    func testFocusTriggersImmediatePush() async throws {
+        try requireIntegrationEnv()
+        let central = Self.makeTestCentral()
+
+        let connected = expectation(description: "connected to the mock camera")
+        let pushedOnConnect = expectation(description: "initial on-connect push")
+        let pushedOnFocus = expectation(description: "second push triggered by FF02 focus-acquired")
+
+        let monitor = Task {
+            for await event in central.events {
+                switch event {
+                case .stateChanged(let state):
+                    NSLog("[IT] stateChanged(\(state))")
+                    if state == .connected { connected.fulfill() }
+                case .locationPushed(let count):
+                    NSLog("[IT] locationPushed(\(count))")
+                    // Exact matches: `>=` would re-fulfill on the next push, and XCTest treats an over-fulfilled
+                    // expectation as a fatal API violation (it crashes the runner — seen on-device 2026-07-15).
+                    if count == 1 { pushedOnConnect.fulfill() }
+                    if count == 2 { pushedOnFocus.fulfill() }
+                case .failure(let message):
+                    NSLog("[IT] failure(\(message))")
+                default:
+                    break
+                }
+            }
+        }
+
+        await central.start()
+        await central.setEnabled(true)
+        let feeder = startFeedingStationary(central)
+
+        await fulfillment(of: [connected, pushedOnConnect], timeout: 45)
+        await fulfillment(of: [pushedOnFocus], timeout: 20)
+
+        feeder.cancel()
+        monitor.cancel()
+        await central.stop()
+    }
+
     /// Requires the Mac sim in **`ALFA_SIM_SCRIPT=standby`** mode (it sends a CC05 power-off notification shortly after
     /// the first location write). Proves the standby-bail path over the real radio: on a CC05 `off` signal the engine
     /// backs off (no standing connect, no auto-reconnect) rather than churning.
     func testBacksOffOnCameraStandby() async throws {
         try requireIntegrationEnv()
-        let central = CameraCentral(bondedStore: EphemeralBondedStore())
+        let central = Self.makeTestCentral()
 
         let connected = expectation(description: "connected to the mock camera")
         let backedOff = expectation(description: "backed off after CC05 standby")

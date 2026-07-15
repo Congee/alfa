@@ -34,7 +34,9 @@ enum LinkEvent: Sendable, Equatable {
 final class CameraLink: NSObject, @unchecked Sendable {
     private let queue = DispatchQueue(label: "me.congee.alfa.ble", qos: .userInitiated)
     private let onEvent: @Sendable (LinkEvent) -> Void
-    private let restoreIdentifier: String
+    /// CoreBluetooth state-restoration identifier; `nil` opts out of restoration entirely (used by the on-device
+    /// integration tests, whose extra central must not consume — and thereby cancel — the app's preserved intents).
+    private let restoreIdentifier: String?
     /// Connection-lifecycle log. Focused on the seams that are otherwise unobservable during a background
     /// state-restoration relaunch (no debugger attaches). Filter in Console.app: `subsystem:me.congee.alfa`.
     private let log = Logger(subsystem: "me.congee.alfa", category: "ble")
@@ -51,6 +53,11 @@ final class CameraLink: NSObject, @unchecked Sendable {
     // Camera Control service characteristics (nil until discovered / absent on some bodies).
     private var powerStateChar: CBCharacteristic? // CC05
     private var timeSyncChar: CBCharacteristic?   // CC13
+
+    // Remote Control service characteristic (nil until discovered / absent on some bodies). Listen-only in Phase 1:
+    // FF02 carries focus/shutter status (feeds "update location on focus"); FF01 remote *commands* are Phase 2 and
+    // are never written here.
+    private var remoteStatusChar: CBCharacteristic? // FF02
     /// Time-sync bytes staged before `CC13` is known (or written the moment it is), so the write survives whichever
     /// order the location- and camera-control services finish discovery in.
     private var pendingTimeSync: [UInt8]?
@@ -60,6 +67,7 @@ final class CameraLink: NSObject, @unchecked Sendable {
     private var scanTimeout: DispatchWorkItem?
     private var bondRetries = 0
     private var powerNotifyRetries = 0
+    private var remoteNotifyRetries = 0
     /// Whether the app is in the foreground. A background scan can't surface manufacturer data (so the power gate can't
     /// run), so the "saw no advertisement → direct connect" fallback is allowed only in the foreground — otherwise a
     /// background reconnect would blindly re-link to an off-but-connectable camera and drain it.
@@ -124,7 +132,7 @@ final class CameraLink: NSObject, @unchecked Sendable {
     private static let discoveryStallSeconds = 15.0
 
     init(
-        restoreIdentifier: String,
+        restoreIdentifier: String?,
         knownIdentifier: UUID?,
         onEvent: @escaping @Sendable (LinkEvent) -> Void
     ) {
@@ -144,7 +152,7 @@ final class CameraLink: NSObject, @unchecked Sendable {
             guard manager == nil else { return }
             var options: [String: Any] = [:]
             #if os(iOS)
-            options[CBCentralManagerOptionRestoreIdentifierKey] = restoreIdentifier
+            if let restoreIdentifier { options[CBCentralManagerOptionRestoreIdentifierKey] = restoreIdentifier }
             #endif
             manager = CBCentralManager(delegate: self, queue: queue, options: options)
         }
@@ -181,7 +189,7 @@ final class CameraLink: NSObject, @unchecked Sendable {
                     log.notice("restore: link survived — re-discovering services to resume")
                     stopScan()
                     handshakeComplete = false
-                    peripheral.discoverServices([SonyCBUUID.locationService, SonyCBUUID.cameraControlService])
+                    peripheral.discoverServices([SonyCBUUID.locationService, SonyCBUUID.cameraControlService, SonyCBUUID.remoteControlService])
                     scheduleDiscoveryStallTimeout()
                     return
                 }
@@ -372,10 +380,12 @@ final class CameraLink: NSObject, @unchecked Sendable {
         notifyChar = nil
         powerStateChar = nil
         timeSyncChar = nil
+        remoteStatusChar = nil
         pendingTimeSync = nil
         handshakeComplete = false
         bondRetries = 0
         powerNotifyRetries = 0
+        remoteNotifyRetries = 0
         sawCameraOff = false
         lastAdvCameraOn = nil
         didBond = knownIdentifier != nil // bonding survives a drop; only a forgotten camera resets it
@@ -493,7 +503,7 @@ final class CameraLink: NSObject, @unchecked Sendable {
         guard let peripheral, inStandby else { return }
         if writeChar == nil, unlockChar == nil, enableChar == nil {
             log.notice("standby probe — re-running service discovery")
-            peripheral.discoverServices([SonyCBUUID.locationService, SonyCBUUID.cameraControlService])
+            peripheral.discoverServices([SonyCBUUID.locationService, SonyCBUUID.cameraControlService, SonyCBUUID.remoteControlService])
         } else {
             handshakeAttempts = 0
             startHandshake()
@@ -626,7 +636,7 @@ extension CameraLink: CBCentralManagerDelegate {
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         // Location service drives geotagging; the Camera Control service (CC05) is a best-effort standby signal.
         log.notice("connected — discovering services")
-        peripheral.discoverServices([SonyCBUUID.locationService, SonyCBUUID.cameraControlService])
+        peripheral.discoverServices([SonyCBUUID.locationService, SonyCBUUID.cameraControlService, SonyCBUUID.remoteControlService])
         scheduleDiscoveryStallTimeout()
     }
 
@@ -666,8 +676,9 @@ extension CameraLink: CBPeripheralDelegate {
         notifyChar = nil
         powerStateChar = nil
         timeSyncChar = nil
+        remoteStatusChar = nil
         handshakeComplete = false
-        peripheral.discoverServices([SonyCBUUID.locationService, SonyCBUUID.cameraControlService])
+        peripheral.discoverServices([SonyCBUUID.locationService, SonyCBUUID.cameraControlService, SonyCBUUID.remoteControlService])
         scheduleDiscoveryStallTimeout()
     }
 
@@ -699,6 +710,9 @@ extension CameraLink: CBPeripheralDelegate {
                     [SonyCBUUID.cameraPowerState, SonyCBUUID.cameraTimeSync],
                     for: service
                 )
+            case SonyCBUUID.remoteControlService:
+                // FF02 only — the status feed for "update location on focus". FF01 (commands) is Phase 2.
+                peripheral.discoverCharacteristics([SonyCBUUID.remoteStatus], for: service)
             default:
                 break
             }
@@ -753,6 +767,14 @@ extension CameraLink: CBPeripheralDelegate {
                 default:
                     break
                 }
+            }
+        case SonyCBUUID.remoteControlService:
+            for characteristic in characteristics where characteristic.uuid == SonyCBUUID.remoteStatus {
+                // Focus/shutter status feed. Subscribing is listen-only and safe whatever the camera's Bluetooth
+                // remote-control setting: when it's off the camera stays silent or reports `02 C3 00` (docs/03) —
+                // absence of the whole service is equally fine, geotagging works without it.
+                remoteStatusChar = characteristic
+                peripheral.setNotifyValue(true, for: characteristic)
             }
         default:
             break
@@ -836,6 +858,12 @@ extension CameraLink: CBPeripheralDelegate {
                     self.peripheral?.setNotifyValue(true, for: powerStateChar)
                     self.peripheral?.readValue(for: powerStateChar)
                 }
+            }
+        case SonyCBUUID.remoteStatus:
+            guard error != nil, remoteNotifyRetries < Self.maxBondRetries else { return }
+            remoteNotifyRetries += 1
+            queue.asyncAfter(deadline: .now() + 3) { [self] in
+                if let remoteStatusChar { self.peripheral?.setNotifyValue(true, for: remoteStatusChar) }
             }
         default:
             break

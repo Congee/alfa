@@ -322,7 +322,7 @@ advertisement — see `Tools/ble-integration/README.md`):
 
 - **`AlfaCameraSim`** (Mac, `CBPeripheralManager`) — advertises the Sony location service (the app accepts it in DEBUG
   only when `ALFA_TEST_ACCEPT_SIM=1`, and then *only* the sim, so a real A7R V nearby can't win the race), serves the
-  DD11/DD30/DD31/DD01/CC05/CC13 GATT, and drives `ALFA_SIM_SCRIPT` scenarios (`none`, `standby`).
+  DD11/DD30/DD31/DD01/CC05/CC13/FF02 GATT, and drives `ALFA_SIM_SCRIPT` scenarios (`none`, `standby`, `focus`).
 - **`Tests/AlfaIntegrationTests`** (device, hosted by the Alfa app) — drives the real `CameraCentral` over the real
   radio and asserts. `Tools/ble-integration/on-device-it.sh` runs it all with one command.
 
@@ -332,6 +332,7 @@ advertisement — see `Tools/ble-integration/README.md`):
 |-----------|--------------------------------------------------------------------------------|--------|
 | `connect` | discover → bond (notify-subscribe) → fw handshake (DD30/DD31) → DD11 push       | ✅ PASS |
 | `standby` | `CC05` off notification → engine backs off (no standing connect, no reconnect)  | ✅ PASS |
+| `focus`   | `FF02` focus-acquired → immediate DD11 push while stationary (gates bypassed)   | ✅ PASS (2026-07-15) |
 
 **Not covered by the harness (by design):** the **power-cycle reconnect** (IT-12) and **fix-expiry** (IT-11) paths need
 the peripheral's *radio* to vanish, which a macOS `CBPeripheralManager` cannot do — releasing the manager or exiting the
@@ -344,6 +345,18 @@ camera's actual CC05-vs-disconnect ordering, by the on-device log capture below 
 **Steps:** Home → Forget camera → confirm. **Expect:** immediate Camera-row clear + `disconnected`; remembered camera
 gone across relaunch. Then forget on both OS + camera side (reset procedure) and re-run IT-2.
 **Pass:** clean forget; a subsequent pair behaves like first-time.
+
+## IT-13 — Update location on focus *(real camera)*
+
+**Pre:** bonded + connected + geotagging; enable the camera's Bluetooth remote-control setting (pin its exact A7R V
+menu path here when running this — do not guess it). Console streaming `subsystem:me.congee.alfa`.
+**Steps:** stand still (so the distance gate stays closed), half-press the shutter until focus locks.
+**Expect:** `notify FF02 = 02 3F 20` in the log followed immediately by `location write acked`; the camera's location
+overlay refreshes. Rapid AF re-acquisitions within ~2 s must **not** produce extra writes (focus-push throttle).
+With the camera's remote setting **off**: no focus events arrive (or `02 C3 00`), and geotagging is unaffected.
+**Pass:** half-press → immediate push, throttled; no writes and no errors with the setting off.
+*(The FF02 → push mechanics are pre-verified over the real radio by the harness `focus` scenario below; this test
+pins the real body's behavior and the camera-side setting.)*
 
 ## IT-9 — GPS accuracy *(Rig B — iPhone)*
 
