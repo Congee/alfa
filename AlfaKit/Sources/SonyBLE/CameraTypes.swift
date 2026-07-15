@@ -6,6 +6,10 @@ public enum CameraConnectionState: Sendable, Equatable {
     case scanning
     case connecting
     case connected
+    /// Link is held to a camera that is connected at the BLE layer but **powered off** ("Cnct. while Power OFF" grants
+    /// the link while off). Nothing is written; the link is kept dormant so geotagging resumes the instant the camera
+    /// powers on — without the reconnect churn that drains the camera. See `docs/05-battery-strategy.md`.
+    case standby
     /// Camera is in standby; the engine has deliberately backed off (no standing connect, no auto-reconnect).
     case backedOff
     /// Bluetooth is unavailable (powered off / unauthorized).
@@ -14,7 +18,7 @@ public enum CameraConnectionState: Sendable, Equatable {
     /// True while the engine is holding or actively pursuing a link.
     public var isActive: Bool {
         switch self {
-        case .scanning, .connecting, .connected: true
+        case .scanning, .connecting, .connected, .standby: true
         case .idle, .backedOff, .unavailable: false
         }
     }

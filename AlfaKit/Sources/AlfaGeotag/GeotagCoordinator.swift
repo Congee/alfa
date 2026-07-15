@@ -3,6 +3,9 @@ import Foundation
 import Observation
 import SonyBLE
 import os
+#if canImport(UIKit)
+import UIKit
+#endif
 
 /// Orchestrates battery-efficient geotagging: owns the CoreLocation source and drives ``CameraCentral`` under the
 /// Balanced policy (decision D4). `@MainActor` and `@Observable` so SwiftUI can bind directly.
@@ -93,9 +96,15 @@ public final class GeotagCoordinator {
         escalateLocationPermission()
         location.setDistanceFilter(minimumDistanceMeters)
         location.start()
+        let foreground = Self.isAppForeground
         Task {
-            await central.start()
+            // Seed foreground state and apply settings *before* start() so both are live on the link the moment
+            // `willRestoreState` runs during start() — the scenePhase pipeline is asynchronous and must not be the
+            // only source (a link defaulting to "foreground" on a background relaunch would try to scan, which iOS
+            // ignores in the background, instead of arming the standing connect). None of these need a live link.
+            await central.setForeground(foreground)
             await applySettingsToCentral()
+            await central.start()
             await central.setEnabled(true)
         }
     }
@@ -107,16 +116,31 @@ public final class GeotagCoordinator {
     /// it had dropped, cleanly backed off. Called from the app-launch hook; a no-op unless geotagging was on before.
     public func resumeIfPreviouslyEnabled() {
         guard wasEnabledAtLaunch, !isEnabled else { return }
-        log.notice("resuming geotag after relaunch (state restoration)")
+        log.notice("resuming geotag after relaunch (state restoration, \(Self.isAppForeground ? "foreground" : "background", privacy: .public) launch)")
         isEnabled = true
         startPipelinesIfNeeded()
         location.setDistanceFilter(minimumDistanceMeters)
         location.start()
+        let foreground = Self.isAppForeground
         Task {
-            await central.start()
+            // Seed foreground + settings before start(): both must be live when `willRestoreState` runs (see `enable`).
+            // Seeding is what makes a *background* relaunch take the standing-connect path instead of a doomed scan.
+            await central.setForeground(foreground)
             await applySettingsToCentral()
+            await central.start()
             await central.setEnabled(true)
         }
+    }
+
+    /// Whether the app is currently foreground-ish (not `.background`). Read synchronously from UIKit at the seams
+    /// where the engine starts, because the scenePhase pipeline is asynchronous — on a background state-restoration
+    /// relaunch the scene may not even be created, so this is the only reliable initial value.
+    private static var isAppForeground: Bool {
+        #if canImport(UIKit)
+        UIApplication.shared.applicationState != .background
+        #else
+        true
+        #endif
     }
 
     /// Turns geotagging off: stops location updates and tells the engine to disconnect and stay backed off. The
@@ -135,10 +159,9 @@ public final class GeotagCoordinator {
         Task { await central.requestSync() }
     }
 
-    /// Reports app foreground/background transitions (wire this to `scenePhase`). In the foreground a dropped link is
-    /// re-established automatically — so the camera geotags again as soon as it powers back on, without a "Sync now"
-    /// tap — and returning to the foreground retries from back-off. Backgrounding cancels any *pending* connect so
-    /// none lingers as a wake-magnet, while keeping a live link for background geotagging.
+    /// Reports app foreground/background transitions (wire this to `scenePhase`). Returning to the foreground retries
+    /// from back-off; backgrounding keeps a live link **and** any standing reconnect intent, so the camera geotags
+    /// again as soon as it powers back on — no "Sync now" tap, foreground or background.
     public func setForeground(_ active: Bool) {
         Task { await central.setForeground(active) }
     }
@@ -183,6 +206,7 @@ public final class GeotagCoordinator {
     private func applySettingsToCentral() async {
         await central.setPolicy(settings.policy())
         await central.setTimeSync(clock: settings.syncClock, timeZone: settings.syncTimeZone)
+        await central.setBackgroundResume(settings.backgroundResume)
     }
 
     /// Escalates location permission one step toward Always when geotagging is enabled outside the guided flow.
@@ -218,6 +242,7 @@ public final class GeotagCoordinator {
         case .scanning: "Searching…"
         case .connecting: "Connecting…"
         case .connected: "Connected"
+        case .standby: "Camera in standby"
         case .backedOff: "Standby (backed off)"
         case .unavailable: "Bluetooth off"
         }
@@ -271,12 +296,15 @@ public final class GeotagCoordinator {
     public var isConnected: Bool { connection == .connected }
     /// The engine is actively scanning/connecting.
     public var isSearching: Bool { connection == .scanning || connection == .connecting }
+    /// A link is held to a camera that is powered off (dormant, waiting to resume on power-on).
+    public var isStandby: Bool { connection == .standby }
 
     // Settings, as primitives the UI can bind to without importing SonyBLE.
     public var distanceMeters: Double { settings.distanceMeters }
     public var intervalSeconds: TimeInterval { settings.intervalSeconds }
     public var syncClock: Bool { settings.syncClock }
     public var syncTimeZone: Bool { settings.syncTimeZone }
+    public var backgroundResume: Bool { settings.backgroundResume }
 
     public func setDistanceMeters(_ meters: Double) {
         var updated = settings; updated.distanceMeters = meters; updateSettings(updated)
@@ -292,6 +320,10 @@ public final class GeotagCoordinator {
 
     public func setSyncTimeZone(_ on: Bool) {
         var updated = settings; updated.syncTimeZone = on; updateSettings(updated)
+    }
+
+    public func setBackgroundResume(_ on: Bool) {
+        var updated = settings; updated.backgroundResume = on; updateSettings(updated)
     }
 
     // MARK: - Pipelines
@@ -337,6 +369,12 @@ public final class GeotagCoordinator {
             connection = state
             // The heartbeat lives no longer than a live link; it is (re)armed by each push below, not here.
             if state != .connected { stopHeartbeat() }
+            // Tie location delivery to the link. Connected (fresh connect, or standby → power-on) → continuous:
+            // disables iOS's stationary auto-pause and un-pauses if it already hit (a pause never undoes itself, and
+            // a paused app suspends — freezing the keep-alive until the camera expires its fix). Any other state →
+            // restore the auto-pause default so an idle background app costs nothing extra. This is the "geolocation
+            // resumes with the camera" half of background auto-resume.
+            if isEnabled { location.setContinuous(state == .connected) }
         case let .bluetoothAvailability(availability): bluetooth = availability
         case .discovered: break
         case let .cameraIdentified(_, name): cameraName = name ?? "Sony camera"

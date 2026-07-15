@@ -78,13 +78,24 @@ final class LocationProvider: NSObject, @unchecked Sendable {
     func start() {
         #if os(iOS)
         manager.allowsBackgroundLocationUpdates = true
-        // Let iOS auto-pause location when it detects we're stationary — that's the battery-smart default and we don't
-        // fight it. Keeping the camera's fix alive is decoupled from location *delivery*: the coordinator's keep-alive
-        // heartbeat re-pushes the last cached fix on its own timer regardless of whether new samples are arriving. So
-        // the camera never expires its fix, and we don't burn GPS holding a link to fresh location we aren't moving to.
+        // Default to iOS's battery-smart auto-pause while no camera is connected. `setContinuous(true)` overrides it
+        // for the lifetime of a live link (see below) — the connection state, not this entry point, decides.
         manager.pausesLocationUpdatesAutomatically = true
         #endif
         manager.startUpdatingLocation()
+    }
+
+    /// Continuous mode, tied by the coordinator to the camera link. While a camera is **connected**, location must
+    /// keep flowing in the background: both to geotag movement and because the keep-alive heartbeat only runs while
+    /// the app has runtime — iOS's stationary auto-pause suspends the app, freezing the 45 s re-push mid-session
+    /// until the camera's fix expires (field log 2026-07-14: a 4-minute background silence). `true` disables the
+    /// auto-pause and re-kicks updates (a pause never undoes itself — Apple requires an explicit restart); `false`
+    /// restores the battery-smart default the moment no live camera depends on updates.
+    func setContinuous(_ continuous: Bool) {
+        #if os(iOS)
+        manager.pausesLocationUpdatesAutomatically = !continuous
+        #endif
+        if continuous { manager.startUpdatingLocation() }
     }
 
     func stop() {
@@ -99,6 +110,10 @@ extension LocationProvider: CLLocationManagerDelegate {
 
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
         for location in locations where location.horizontalAccuracy >= 0 {
+            // CoreLocation replays the last cached fix when updates (re)start; on a background resume that replay can
+            // be minutes old. The DD11 packet embeds the fix's timestamp (which the camera may treat as time
+            // correction), so a stale replay must never be pushed — a genuinely fresh fix follows within seconds.
+            guard Date().timeIntervalSince(location.timestamp) < 60 else { continue }
             sampleContinuation.yield(LocationFix(
                 latitude: location.coordinate.latitude,
                 longitude: location.coordinate.longitude,

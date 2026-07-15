@@ -25,6 +25,17 @@ public actor CameraCentral {
     // `syncClock` gates the best-effort CC13 clock write on connect.
     private var syncClock = true
     private var syncTimeZone = true
+    // Mirrored from `GeotagSettings.backgroundResume`: hold a standing connect on a dropped link for background
+    // auto-resume. Stored here so it survives a `link` recreation (re-applied in `start()`).
+    private var backgroundResume = false
+    // Whether the app is in the foreground. Mirrored here (not just forwarded) so it survives a `link` recreation and,
+    // crucially, so a value seeded *before* `start()` reaches the link the moment it is created — a background
+    // state-restoration relaunch must never let the link default to "foreground" and try to scan (see `docs/05`).
+    private var isForeground = true
+    // Last "Cnct. while Power OFF" state read from an advertisement (`0x21` bit `0x80`), persisted with the bonded
+    // camera. Informational these days (the decline gate it once fed is gone) — kept for diagnostics and store
+    // compatibility.
+    private var lastSeenConnectsWhilePoweredOff: Bool?
 
     private let eventContinuation: AsyncStream<CameraEvent>.Continuation
     private let linkEvents: AsyncStream<LinkEvent>
@@ -48,12 +59,17 @@ public actor CameraCentral {
     public func start() {
         guard link == nil else { return }
         let continuation = linkEventContinuation
+        let remembered = bondedStore.load()
         let newLink = CameraLink(
             restoreIdentifier: "me.congee.alfa.central",
-            knownIdentifier: bondedStore.load()?.id, // re-adopt the remembered camera without a fresh scan
+            knownIdentifier: remembered?.id, // re-adopt the remembered camera without a fresh scan
             onEvent: { continuation.yield($0) }
         )
         link = newLink
+        // Re-apply mirrored state across a link recreation — both enqueue on the link's serial queue ahead of
+        // `activate()`, so the flags are live before the first CoreBluetooth callback (incl. `willRestoreState`).
+        newLink.setBackgroundResume(backgroundResume)
+        newLink.setForeground(isForeground)
 
         let stream = linkEvents
         consumeTask = Task { [weak self] in
@@ -77,10 +93,12 @@ public actor CameraCentral {
         apply(engine.reduce(&state, .setEnabled(enabled)))
     }
 
-    /// Reports app foreground/background transitions. Foreground enables automatic reconnection when a live link
-    /// drops; backgrounding cancels any pending connect so none survives as a wake-magnet (a live link is kept).
+    /// Reports app foreground/background transitions. Returning to the foreground retries from back-off; leaving it
+    /// keeps a live link **and** any standing reconnect intent so geotagging resumes in the background too. The value
+    /// is mirrored so it survives a `link` recreation and can be seeded before `start()` (background relaunch).
     public func setForeground(_ active: Bool) {
-        link?.setForeground(active) // keep the power gate's fallback background-safe (CameraLink.isForeground)
+        isForeground = active
+        link?.setForeground(active) // the link picks scan-and-gate (fg) vs standing-connect (bg) reconnects with this
         apply(engine.reduce(&state, .setForeground(active)))
     }
 
@@ -113,6 +131,13 @@ public actor CameraCentral {
         syncTimeZone = timeZone
     }
 
+    /// Toggles background auto-resume (a standing connect on a dropped link vs. the conservative scan-and-gate). See
+    /// ``GeotagSettings/backgroundResume``. Applies to the *next* dropped link; a live link is untouched.
+    public func setBackgroundResume(_ enabled: Bool) {
+        backgroundResume = enabled
+        link?.setBackgroundResume(enabled)
+    }
+
     /// Forgets the remembered camera: clears persistence and gracefully drops any live link so the engine returns to a
     /// clean state (the resulting disconnect backs the policy off). The next Sync/enable scans afresh.
     public func forgetCamera() {
@@ -136,12 +161,18 @@ public actor CameraCentral {
             apply(engine.reduce(&state, .bluetoothState(ready: availability == .ready)))
 
         case let .discovered(id, name, rssi, manufacturerData):
-            let model = manufacturerData.flatMap { SonyAdvertisement(manufacturerData: $0)?.modelCode } ?? name
+            let advertisement = manufacturerData.flatMap { SonyAdvertisement(manufacturerData: $0) }
+            // Remember whether this camera stays connectable while off, so it can be persisted for the safety gate.
+            if let cwpo = advertisement?.connectsWhilePoweredOff { lastSeenConnectsWhilePoweredOff = cwpo }
+            let model = advertisement?.modelCode ?? name
             eventContinuation.yield(.discovered(peripheralID: id, modelCode: model, rssi: rssi))
 
         case let .ready(id, name):
-            // Remember this bonded, location-capable camera so a later launch retrieves it directly, no scan needed.
-            bondedStore.save(RememberedCamera(id: id, name: name))
+            // Remember this bonded, location-capable camera so a later launch retrieves it directly, no scan needed —
+            // including its "Cnct. while Power OFF" state (informational; fresh if we saw an advertisement this
+            // connect, else whatever was last persisted — a standing-connect reconnect sees no advertisement).
+            let cwpo = lastSeenConnectsWhilePoweredOff ?? bondedStore.load()?.connectsWhilePoweredOff
+            bondedStore.save(RememberedCamera(id: id, name: name, connectsWhilePoweredOff: cwpo))
             eventContinuation.yield(.cameraIdentified(peripheralID: id, name: name))
             // Best-effort clock sync (beta): the link no-ops when CC13 is absent.
             if syncClock {
@@ -155,6 +186,11 @@ public actor CameraCentral {
 
         case .disconnected:
             apply(engine.reduce(&state, .disconnected))
+
+        case .standby:
+            // Link held to a connected-but-powered-off camera: reflect standby (no push). A later drop re-arms the
+            // background standing connect so geotagging resumes on power-on.
+            apply(engine.reduce(&state, .cameraStandby))
 
         case .wroteLocation:
             pushCount += 1

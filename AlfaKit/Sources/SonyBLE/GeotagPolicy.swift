@@ -28,8 +28,9 @@ public struct GeotagState: Sendable, Equatable {
 /// Inputs that drive the state machine.
 public enum GeotagInput: Sendable, Equatable {
     case setEnabled(Bool)
-    /// The app moved to/from the foreground. Foreground enables automatic reconnection (user present); leaving it
-    /// cancels any *pending* connect so none survives into the background as a wake-magnet.
+    /// The app moved to/from the foreground. Returning to it retries from back-off (user present); leaving it is a
+    /// deliberate no-op — a live link **and** any standing reconnect intent are kept so geotagging resumes in the
+    /// background too. The anti-drain guard is the link layer's ack-gated standby hold, not backgrounding.
     case setForeground(Bool)
     case bluetoothState(ready: Bool)
     /// The link is fully established: services discovered and the fw-gated handshake done.
@@ -38,6 +39,10 @@ public enum GeotagInput: Sendable, Equatable {
     case disconnected
     /// The camera reported (or was inferred to have entered) power-off / standby.
     case cameraPoweredOff
+    /// A link is held to a camera that is connected at the BLE layer but powered off (its handshake writes are
+    /// rejected). Unlike `.cameraPoweredOff` (which tears the link down and backs off), this **keeps** the dormant link
+    /// for background auto-resume: nothing is pushed, but a later drop re-arms the standing connect.
+    case cameraStandby
     case location(LocationFix)
     /// Keep-alive tick: re-send the last pushed position with a fresh timestamp so the camera never ages out its
     /// location fix (the "Location information cannot be obtained" overlay). The camera announces this expiry over no
@@ -105,14 +110,21 @@ public struct GeotagPolicyEngine: Sendable {
 
         case .disconnected:
             guard state.isEnabled else { state.connection = .idle; return [] }
-            // Reconnect after a genuinely established link drops — foreground OR background — by re-arming a standing
-            // connect to the known camera, which iOS services on its next power-on (relaunching us via state
-            // restoration if we were suspended). This is what lets the camera resume geotagging on power-on without a
-            // manual "Sync now", even from the background. We deliberately do NOT reconnect when the disconnect is the
-            // *result of our own standby back-off*: after a `CC05` standby bail the connection is `.backedOff` (not
-            // `.connected`), so the follow-on disconnect from that teardown stays down — that is the wake-magnet loop
-            // against a Cnct-while-Power-OFF standby camera, and it is left for an explicit Sync / foreground return.
-            if state.bluetoothReady, state.connection == .connected {
+            // A genuinely established link dropped: begin discovery to re-establish it. *How* the reconnect behaves is
+            // decided in `CameraLink` from the app's foreground state and the user's "Reconnect in background" setting:
+            //   • foreground — scan, inspect the advertisement's power flags, and connect only to a powered-on camera
+            //     (or, seeing no advertisement at all, direct-connect the known camera);
+            //   • background + setting on — hold a standing connect() so iOS resumes on the camera's next power-on
+            //     (relaunching us via state restoration). Free by construction for a camera that goes silent when off
+            //     ("Cnct. while Power OFF" = Off); a still-connectable off camera is answered but held dormant in
+            //     `.standby` without a single write (Alfa adds no churn — absolute drain pending `docs/08` IT-10);
+            //   • background + setting off — back off (no blind connect); resume on foreground / "Sync now".
+            // Either way we do NOT reconnect when the disconnect is the *result of our own standby back-off*: after a
+            // `CC05` standby bail the connection is `.backedOff` (not `.connected`), so the follow-on teardown
+            // disconnect stays down — that is the wake-magnet loop against a Cnct-while-Power-OFF camera.
+            // A drop from a live link **or** a held dormant standby link (background auto-resume) re-establishes it;
+            // a drop while merely scanning/backed-off does not (that would churn a standby camera).
+            if state.bluetoothReady, state.connection == .connected || state.connection == .standby {
                 state.connection = .scanning
                 return [.beginDiscovery]
             }
@@ -122,8 +134,9 @@ public struct GeotagPolicyEngine: Sendable {
         case let .setForeground(active):
             // Returning to the foreground retries from back-off (e.g. after a standby bail, or if the camera powered on
             // while we were away and iOS did not relaunch us). Leaving the foreground is intentionally a no-op: a live
-            // link and any standing reconnect are **kept** so geotagging resumes in the background too. It is the CC05
-            // standby bail — not backgrounding — that prevents a wake-magnet against a connectable-while-off camera.
+            // link and any standing reconnect are **kept** so geotagging resumes in the background too. What prevents a
+            // connectable-while-off camera from being churned is the link layer's ack-gated standby hold (writes are
+            // never issued until the handshake acknowledges), not backgrounding.
             guard state.isEnabled, active else { return [] }
             return begin(&state, manual: true)
 
@@ -131,6 +144,14 @@ public struct GeotagPolicyEngine: Sendable {
             let wasEnabled = state.isEnabled
             state.connection = wasEnabled ? .backedOff : .idle
             return wasEnabled ? [.cancelDiscoveryAndDisconnect, .backOff] : [.cancelDiscoveryAndDisconnect]
+
+        case .cameraStandby:
+            // Hold the dormant link (the link layer connected but the camera is powered off): reflect standby so the UI
+            // is honest and a later drop re-arms the standing connect (see `.disconnected`). Push nothing — a write to
+            // an off camera is rejected and only churns it. No effect unless we were pursuing/holding a link.
+            guard state.isEnabled, state.connection.isActive else { return [] }
+            state.connection = .standby
+            return []
 
         case let .location(fix):
             state.latest = fix
@@ -194,7 +215,7 @@ public struct GeotagPolicyEngine: Sendable {
             guard manual else { return [] }
             state.connection = .scanning
             return [.beginDiscovery]
-        case .scanning, .connecting, .connected:
+        case .scanning, .connecting, .connected, .standby:
             return []
         }
     }

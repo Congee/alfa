@@ -237,6 +237,55 @@ struct GeotagPolicyTests {
         #expect(state.connection == .scanning)
     }
 
+    @Test("A dormant standby link holds without pushing (link to a powered-off camera)")
+    func standbyHoldsWithoutPushing() {
+        var state = GeotagState()
+        state.bluetoothReady = true
+        _ = engine.reduce(&state, .setEnabled(true)) // scanning
+        // The standing connect linked to an off-but-connectable camera: hold dormant, push nothing.
+        let actions = engine.reduce(&state, .cameraStandby)
+        #expect(actions.isEmpty)
+        #expect(state.connection == .standby)
+        // A location update while dormant must never write to the off camera.
+        #expect(engine.reduce(&state, .location(fix(1, 1))).isEmpty)
+        #expect(engine.reduce(&state, .heartbeat(now: Date(timeIntervalSince1970: 60))).isEmpty)
+    }
+
+    @Test("A drop from standby re-arms the standing connect (power-on resume)")
+    func standbyDropReconnects() {
+        var state = GeotagState()
+        state.bluetoothReady = true
+        _ = engine.reduce(&state, .setEnabled(true))
+        _ = engine.reduce(&state, .cameraStandby)
+        #expect(state.connection == .standby)
+        // The dormant link drops (camera cycled / iOS dropped it) — must re-establish, not back off.
+        let actions = engine.reduce(&state, .disconnected)
+        #expect(actions == [.beginDiscovery])
+        #expect(state.connection == .scanning)
+    }
+
+    @Test("Standby is ignored when not pursuing a link (no phantom standby)")
+    func standbyIgnoredWhenIdle() {
+        var state = GeotagState() // disabled, idle
+        let actions = engine.reduce(&state, .cameraStandby)
+        #expect(actions.isEmpty)
+        #expect(state.connection == .idle)
+    }
+
+    @Test("A powered-on camera leaves standby for connected (resume)")
+    func standbyToConnectedOnPowerOn() {
+        var state = GeotagState()
+        state.bluetoothReady = true
+        _ = engine.reduce(&state, .setEnabled(true))
+        _ = engine.reduce(&state, .cameraStandby)
+        #expect(state.connection == .standby)
+        // The handshake finally acknowledges (camera powered on) → `.connected`, and the first fix pushes.
+        state.latest = fix(2, 3)
+        let actions = engine.reduce(&state, .connected)
+        #expect(actions == [.pushLocation(fix(2, 3))])
+        #expect(state.connection == .connected)
+    }
+
     @Test("A CC05 standby bail does not reconnect (no wake-magnet loop)")
     func standbyBailDoesNotReconnect() {
         var state = enabledAndConnected()
