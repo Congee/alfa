@@ -23,6 +23,19 @@ public actor CameraCentral {
     private var pushCount = 0
     private var lastEmittedConnection: CameraConnectionState = .idle
 
+    // Phase 2 remote control: a second pure engine beside the geotag policy, same actor (both must serialize
+    // writes through the one link), wholly independent state. Its actions can express only command writes and
+    // timeout arming — never a connection change (the anti-churn invariant is structural).
+    private let remoteEngine = RemoteControlEngine()
+    private var remoteState = RemoteControlState()
+    private var lastEmittedRemoteState = RemoteControlState()
+    /// In-flight capture-sequence timeouts, keyed by kind (the reducer's own phase guards ensure at most one of
+    /// each is meaningful). Stale fires are additionally rejected by the reducer's generation tag, so correctness
+    /// never depends on `cancel()` winning a race against the sleep.
+    private var remoteTimeouts: [RemoteTimeout.Kind: Task<Void, Never>] = [:]
+    /// RSSI poll cadence for the remote UI's signal indicator — slow enough to be battery-irrelevant.
+    private static let rssiPollIntervalSeconds: TimeInterval = 2
+
     // Time-sync preferences (mirrored from `GeotagSettings`). `syncTimeZone` gates the DD11 tz/dst block;
     // `syncClock` gates the best-effort CC13 clock write on connect; `useGPSTime` sources that write from the
     // GNSS fix's timestamp instead of the device clock.
@@ -103,6 +116,9 @@ public actor CameraCentral {
         link = nil
         consumeTask?.cancel()
         consumeTask = nil
+        // The connection transition above already reset the remote engine's beliefs; the Tasks just need killing.
+        remoteTimeouts.values.forEach { $0.cancel() }
+        remoteTimeouts = [:]
     }
 
     public func setEnabled(_ enabled: Bool) {
@@ -179,6 +195,98 @@ public actor CameraCentral {
         bondedStore.load()
     }
 
+    // MARK: - Remote control (Phase 2)
+
+    /// Tap-mode shutter: runs the safe autonomous capture sequence (half → focus-ack/timeout → full → release).
+    public func shutterTapped() {
+        applyRemote(remoteEngine.reduce(&remoteState, .shutterAutoSequenceRequested(now: Date())))
+    }
+
+    /// Gesture-driven shutter stages (sustained half in tap mode; both stages in two-stage touch mode).
+    public func shutterHalfDown() {
+        applyRemote(remoteEngine.reduce(&remoteState, .shutterHalfDown(now: Date())))
+    }
+
+    public func shutterHalfUp() {
+        applyRemote(remoteEngine.reduce(&remoteState, .shutterHalfUp(now: Date())))
+    }
+
+    public func shutterFullDown() {
+        applyRemote(remoteEngine.reduce(&remoteState, .shutterFullDown(now: Date())))
+    }
+
+    public func shutterFullUp() {
+        applyRemote(remoteEngine.reduce(&remoteState, .shutterFullUp(now: Date())))
+    }
+
+    public func shutterGestureCancelled() {
+        applyRemote(remoteEngine.reduce(&remoteState, .shutterCancelled(now: Date())))
+    }
+
+    public func buttonDown(_ button: RemoteHoldButton) {
+        applyRemote(remoteEngine.reduce(&remoteState, .buttonDown(button, now: Date())))
+    }
+
+    public func buttonUp(_ button: RemoteHoldButton) {
+        applyRemote(remoteEngine.reduce(&remoteState, .buttonUp(button, now: Date())))
+    }
+
+    public func buttonLockToggled(_ button: RemoteHoldButton) {
+        applyRemote(remoteEngine.reduce(&remoteState, .buttonLockToggled(button, now: Date())))
+    }
+
+    public func recordTapped() {
+        applyRemote(remoteEngine.reduce(&remoteState, .recordTapped(now: Date())))
+    }
+
+    /// Starts/stops the RSSI poll for the remote UI's signal indicator — driven by the Remote tab's visibility,
+    /// so an idle app never reads RSSI.
+    public func setRemoteUIVisible(_ visible: Bool) {
+        if visible {
+            link?.startRSSIPolling(interval: Self.rssiPollIntervalSeconds)
+        } else {
+            link?.stopRSSIPolling()
+        }
+    }
+
+    #if DEBUG
+    /// Zoom/MF opcode probe (docs/03 — the groups are disputed): fires raw bytes through the same gated FF01
+    /// write path, deliberately bypassing the remote engine — a probe triple is not a modeled button and must
+    /// never be interpreted as one. Debug builds only; results are read from the FF02 log.
+    public func sendProbeCommand(_ bytes: [UInt8]) {
+        guard state.connection == .connected else { return }
+        link?.writeRemoteCommand(bytes)
+    }
+    #endif
+
+    /// Applies remote-engine actions (command writes + timeout arming) and republishes the remote state on change.
+    private func applyRemote(_ actions: [RemoteControlAction]) {
+        for action in actions {
+            switch action {
+            case let .sendCommand(bytes):
+                link?.writeRemoteCommand(bytes)
+            case let .armTimeout(timeout, after):
+                remoteTimeouts[timeout.kind]?.cancel()
+                remoteTimeouts[timeout.kind] = Task { [weak self] in
+                    try? await Task.sleep(for: .seconds(after))
+                    guard !Task.isCancelled else { return }
+                    await self?.remoteTimedOut(timeout)
+                }
+            case let .cancelTimeout(kind):
+                remoteTimeouts[kind]?.cancel()
+                remoteTimeouts[kind] = nil
+            }
+        }
+        if remoteState != lastEmittedRemoteState {
+            lastEmittedRemoteState = remoteState
+            eventContinuation.yield(.remoteControl(remoteState))
+        }
+    }
+
+    private func remoteTimedOut(_ timeout: RemoteTimeout) {
+        applyRemote(remoteEngine.reduce(&remoteState, .timedOut(timeout)))
+    }
+
     // MARK: - Link event handling
 
     private func handle(_ event: LinkEvent) {
@@ -240,14 +348,22 @@ public actor CameraCentral {
             if updateOnFocus, status == .focusAcquired || status == .pictureBeingTaken {
                 apply(engine.reduce(&state, .captureActivity(now: Date())))
             }
+            // The same decoded status independently drives the remote-control engine (capture sequencing,
+            // recording/exposing indicators) — one notify, two pure reducers.
+            applyRemote(remoteEngine.reduce(&remoteState, .remoteStatus(status, now: Date())))
 
         case .notify:
             // Raw feeds with no policy meaning yet (DD01 location-enabled flag, the CC10 probe) — logged at the link.
             break
 
-        case .wroteRemoteCommand, .remoteCommandWriteFailed, .rssi:
-            // Phase 2 remote-control feedback — consumed by the remote-control engine (wired in a later slice).
-            break
+        case .wroteRemoteCommand:
+            break // informational — the engine's beliefs advance on FF02 statuses, not write acks
+
+        case let .remoteCommandWriteFailed(message):
+            applyRemote(remoteEngine.reduce(&remoteState, .commandWriteFailed(message)))
+
+        case let .rssi(value):
+            eventContinuation.yield(.rssi(value))
 
         case let .failure(message):
             eventContinuation.yield(.failure(message))
@@ -277,6 +393,9 @@ public actor CameraCentral {
         if state.connection != lastEmittedConnection {
             lastEmittedConnection = state.connection
             eventContinuation.yield(.stateChanged(state.connection))
+            // Mirror the transition into the remote engine: leaving `.connected` resets its transient beliefs
+            // (held buttons, in-flight sequences) so a reconnect never inherits a stale press.
+            applyRemote(remoteEngine.reduce(&remoteState, .connectionChanged(state.connection)))
         }
         for action in actions {
             switch action {

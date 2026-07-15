@@ -438,6 +438,7 @@ public final class GeotagCoordinator {
             if isEnabled { location.setContinuous(state == .connected) }
         case let .bluetoothAvailability(availability): bluetooth = availability
         case .discovered: break
+        case .remoteControl, .rssi: break // consumed by the RemoteCoordinator (next slice), not the geotag façade
         case let .cameraIdentified(_, name): cameraName = name ?? "Sony camera"
         case let .locationPushed(count, fix):
             pushCount = count

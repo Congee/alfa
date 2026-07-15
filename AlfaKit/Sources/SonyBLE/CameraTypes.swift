@@ -52,6 +52,11 @@ public enum CameraEvent: Sendable, Equatable {
     case cameraIdentified(peripheralID: UUID, name: String?)
     /// A location write was acknowledged; `fix` is the position the camera now holds (drives the Home map marker).
     case locationPushed(count: Int, fix: LocationFix?)
+    /// Phase 2 remote-control state (capture sequence, held buttons, wire-confirmed recording/exposing) — emitted
+    /// whenever it changes. The full pure state rides along so the remote UI derives everything from one value.
+    case remoteControl(RemoteControlState)
+    /// Live link signal strength (dBm), from the foreground-only RSSI poll while the remote UI is visible.
+    case rssi(Int)
     case failure(String)
 }
 
