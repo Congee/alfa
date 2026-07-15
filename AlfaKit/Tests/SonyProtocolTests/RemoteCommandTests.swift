@@ -31,6 +31,18 @@ struct RemoteCommandTests {
         #expect(SonyRemoteStatus(rawValue: [0x02, 0xC3, 0x00]) == .remoteFeatureInactive)
     }
 
+    #if DEBUG
+    @Test("Probe candidates encode as [0x02, group, step] for every disputed opcode group")
+    func probeBytes() {
+        #expect(SonyRemoteCommand.probeBytes(group: .g44, step: 0x10) == [0x02, 0x44, 0x10])
+        #expect(SonyRemoteCommand.probeBytes(group: .g47, step: 0x20) == [0x02, 0x47, 0x20])
+        #expect(SonyRemoteCommand.probeBytes(group: .g6A, step: 0x10) == [0x02, 0x6A, 0x10])
+        #expect(SonyRemoteCommand.probeBytes(group: .g6D, step: 0x20) == [0x02, 0x6D, 0x20])
+        let raws = SonyRemoteCommand.ProbeGroup.allCases.map(\.rawValue)
+        #expect(raws == [0x44, 0x45, 0x46, 0x47, 0x6A, 0x6B, 0x6C, 0x6D])
+    }
+    #endif
+
     @Test("Unrecognized or malformed FF02 payloads fall back to .unknown, never crash")
     func statusDecodeFallback() {
         #expect(SonyRemoteStatus(rawValue: []) == .unknown(rawValue: []))
