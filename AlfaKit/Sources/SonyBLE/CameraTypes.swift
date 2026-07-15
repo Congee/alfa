@@ -61,7 +61,9 @@ public struct ConnectionPolicy: Sendable, Equatable {
     /// expires ("Location information cannot be obtained"). Once this elapses since the last write, the next
     /// opportunity re-pushes regardless of movement — while stationary via the heartbeat, while moving via the
     /// location gate (pushing the *fresh* position). `0` disables the keep-alive. Must stay below the camera-side
-    /// timeout (`docs/08` IT-11 measures it); default matches Sony's own ~10 s cadence (`docs/07`).
+    /// timeout (~60 s tolerance, user-confirmed; `docs/08` IT-11 pins the exact number): 45 s keeps a safety margin
+    /// while sending ~4–5× fewer writes than Sony's own ~10 s Creators' App cadence (`docs/07`). This is the single
+    /// source of truth for the cadence — `GeotagCoordinator.heartbeatInterval` derives from it.
     public var keepAliveSeconds: TimeInterval
     /// Keep the link while the camera is powered on (fresh per-shot geotags).
     public var stayConnectedWhileCameraOn: Bool
@@ -71,7 +73,7 @@ public struct ConnectionPolicy: Sendable, Equatable {
     public init(
         minimumDistanceMeters: Double,
         minimumIntervalSeconds: TimeInterval = 0,
-        keepAliveSeconds: TimeInterval = 10,
+        keepAliveSeconds: TimeInterval = 45,
         stayConnectedWhileCameraOn: Bool,
         backOffInStandby: Bool
     ) {
@@ -83,12 +85,12 @@ public struct ConnectionPolicy: Sendable, Equatable {
     }
 
     /// The locked Phase 1 default (decision D4): connected while on, fully backed off in standby. The interval
-    /// throttle is off by default (distance-only), matching the pre-settings behavior; the 10 s keep-alive prevents
-    /// the camera from expiring a fix while the phone is stationary or moving slowly.
+    /// throttle is off by default (distance-only), matching the pre-settings behavior; the 45 s keep-alive prevents
+    /// the camera from expiring a fix (~60 s tolerance) while the phone is stationary or moving slowly.
     public static let balanced = ConnectionPolicy(
         minimumDistanceMeters: 25,
         minimumIntervalSeconds: 0,
-        keepAliveSeconds: 10,
+        keepAliveSeconds: 45,
         stayConnectedWhileCameraOn: true,
         backOffInStandby: true
     )

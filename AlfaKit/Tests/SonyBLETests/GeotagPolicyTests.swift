@@ -205,9 +205,9 @@ struct GeotagPolicyTests {
     func expiryPushesFreshWhileMovingSlowly() {
         var state = connectedState(engine, latest: fix(0, 0, at: 0)) // lastPushed = (0,0), lastWriteAt = 0
         // ~1 m move within the keep-alive window → still gated (distance + not yet stale).
-        #expect(engine.reduce(&state, .location(fix(0, 0.00001, at: 5))).isEmpty)
-        // ~2 m move but ≥10 s (keepAliveSeconds) since the last write → expiry forces the *fresh* fix through.
-        let fresh = fix(0, 0.00002, at: 10)
+        #expect(engine.reduce(&state, .location(fix(0, 0.00001, at: 20))).isEmpty)
+        // ~2 m move but ≥45 s (keepAliveSeconds) since the last write → expiry forces the *fresh* fix through.
+        let fresh = fix(0, 0.00002, at: 45)
         #expect(engine.reduce(&state, .location(fresh)) == [.pushLocation(fresh)])
     }
 

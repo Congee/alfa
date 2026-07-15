@@ -54,12 +54,13 @@ public final class GeotagCoordinator {
     private static let onboardingKey = "me.congee.alfa.hasCompletedOnboarding"
     private static let enabledKey = "me.congee.alfa.geotagEnabled"
 
-    /// Keep-alive cadence. The camera silently expires a location fix that stops being refreshed, so while connected we
-    /// re-push the last position on this fixed interval — matching Sony's own ~10 s Creators' App cadence (`docs/07`),
-    /// which the user confirmed keeps the fix alive. Deliberately independent of the user's update *interval* (that
-    /// throttles genuine position changes; this only defeats staleness). Must stay well under the camera-side timeout
-    /// (`docs/08` test T1 measures it). Foreground-only by construction — a suspended app can't run this timer.
-    private static let heartbeatInterval: Duration = .seconds(10)
+    /// Stationary keep-alive cadence. The camera silently expires a location fix that stops being refreshed ("Location
+    /// information cannot be obtained"; ~60 s tolerance — user-confirmed, exact number pinned by `docs/08` IT-11), so
+    /// while connected the last position is re-pushed after this much write silence. Derived from the policy's
+    /// `keepAliveSeconds` (the single source of truth, 45 s) so the timer and the reducer's expiry override can never
+    /// disagree. Deliberately independent of the user's update *interval* (that throttles genuine position changes;
+    /// this only defeats staleness).
+    private static let heartbeatInterval: Duration = .seconds(ConnectionPolicy.balanced.keepAliveSeconds)
 
     public init(
         settingsStore: GeotagSettingsStore = UserDefaultsGeotagSettingsStore(),
