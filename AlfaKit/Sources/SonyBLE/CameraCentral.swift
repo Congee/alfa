@@ -231,12 +231,16 @@ public actor CameraCentral {
                CameraPowerState(cc05: value) == .off {
                 apply(engine.reduce(&state, .cameraPoweredOff))
             }
-            // FF02 is the remote status feed: a focus acquisition (half-press) pushes the freshest position so the
-            // shot about to be taken carries it — "update location on focus". The reducer guards and throttles.
-            if characteristic == SonyGATT.Characteristic.remoteStatus,
-               updateOnFocus,
-               SonyRemoteStatus(rawValue: value) == .focusAcquired {
-                apply(engine.reduce(&state, .focusAcquired(now: Date())))
+            // FF02 is the remote status feed: a focus acquisition (half-press) or a fired shutter pushes the freshest
+            // position — "update location on focus". The shutter trigger is not redundant: a back-button-focus shot
+            // has no shot-coupled AF activation, and such a real A7R V photo emitted only the shutter pair
+            // (`02 A0 20/00`, docs/08 IT-13); it also freshens the fix for the next frames of a burst. The reducer
+            // guards and throttles.
+            if characteristic == SonyGATT.Characteristic.remoteStatus, updateOnFocus {
+                let status = SonyRemoteStatus(rawValue: value)
+                if status == .focusAcquired || status == .pictureBeingTaken {
+                    apply(engine.reduce(&state, .captureActivity(now: Date())))
+                }
             }
 
         case let .failure(message):

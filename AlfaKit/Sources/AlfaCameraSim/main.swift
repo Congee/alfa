@@ -84,8 +84,9 @@ final class CameraSim: NSObject, @unchecked Sendable {
     /// Autonomous scenario driver (`ALFA_SIM_SCRIPT`). `.standby` sends a CC05 power-off notification shortly after the
     /// first location write, so an on-device `xcodebuild test` deterministically observes the standby-bail path (the
     /// engine backs off). `.focus` sends an FF02 focus-acquired notification shortly after the first location write,
-    /// so the update-on-focus push path is observable the same way. `.none` leaves the sim a plain, long-running GATT
-    /// mock driven by interactive stdin commands.
+    /// then a shutter-fired pair past the engine's capture throttle, so both update-on-focus push triggers are
+    /// observable the same way. `.none` leaves the sim a plain, long-running GATT mock driven by interactive stdin
+    /// commands.
     enum Script: String { case none, standby, focus }
     private let script: Script
     private var scriptFired = false
@@ -200,6 +201,18 @@ final class CameraSim: NSObject, @unchecked Sendable {
         }
     }
 
+    /// Sends a fired shutter (FF02 `02 A0 20`) followed by the ready state (`02 A0 00`) — the pair a real A7R V was
+    /// observed emitting for an on-body photo taken with back-button focus (no half-press, so no focus event;
+    /// docs/08 IT-13).
+    private func sendShutterFired() {
+        manager.updateValue(Data([0x02, 0xA0, 0x20]), for: remoteStatusChar, onSubscribedCentrals: nil)
+        simLog("[SIM] FF02 notify -> shutter fired")
+        queue.asyncAfter(deadline: .now() + 0.5) { [self] in
+            manager.updateValue(Data([0x02, 0xA0, 0x00]), for: remoteStatusChar, onSubscribedCentrals: nil)
+            simLog("[SIM] FF02 notify -> shutter ready")
+        }
+    }
+
     func handleCommand(_ raw: String) {
         let command = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !command.isEmpty else { return }
@@ -211,6 +224,8 @@ final class CameraSim: NSObject, @unchecked Sendable {
                 sendPowerState(awake: true)
             case "focus":
                 sendFocusAcquired()
+            case "shutter":
+                sendShutterFired()
             case "status":
                 simLog(
                     "[SIM] status cameraAwake=\(cameraAwake) "
@@ -239,9 +254,13 @@ final class CameraSim: NSObject, @unchecked Sendable {
             }
         case .focus:
             scriptFired = true
-            simLog("[SIM] SCRIPT focus — sending FF02 focus-acquired notify in 2s")
+            simLog("[SIM] SCRIPT focus — FF02 focus-acquired in 2s, shutter-fired in 6s")
             queue.asyncAfter(deadline: .now() + 2) { [weak self] in
                 self?.sendFocusAcquired()
+            }
+            // Past the engine's 2 s capture throttle, so it must produce a *third* distinct push.
+            queue.asyncAfter(deadline: .now() + 6) { [weak self] in
+                self?.sendShutterFired()
             }
         }
     }

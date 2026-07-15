@@ -30,7 +30,8 @@ is compiled out of release builds and inert unless the env var is set.
     `quit`).
   - `standby` — sends a `CC05` power-off notification ~2 s after the first location write.
   - `focus` — sends an `FF02` focus-acquired notification (`02 3F 20`, then the release) ~2 s after the first
-    location write.
+    location write, then a shutter-fired pair (`02 A0 20/00`) ~6 s after it — past the engine's 2 s capture throttle,
+    so both triggers must each produce a push.
 - **`Tests/AlfaIntegrationTests/BLEIntegrationTests.swift`** — on-device XCTest, hosted by the Alfa app (so it inherits
   the app's Bluetooth entitlement, usage strings, and existing permission grant). Drives the real `CameraCentral` and
   asserts. Skipped unless `ALFA_RUN_BLE_IT=1`.
@@ -53,7 +54,7 @@ in another (see the script for the exact invocation and the `.xctestrun` env inj
 |-----------|-----------|--------------------------------------------------------------------------------|--------|
 | `connect` | `none`    | discover → bond (notify-subscribe) → fw handshake (DD30/DD31) → DD11 push       | ✅ PASS |
 | `standby` | `standby` | `CC05` off notification → engine backs off (no standing connect, no reconnect)  | ✅ PASS |
-| `focus`   | `focus`   | `FF02` focus-acquired → immediate DD11 push while stationary (gates bypassed)   | ✅ PASS |
+| `focus`   | `focus`   | `FF02` focus-acquired *and* shutter-fired → immediate DD11 pushes while stationary | ✅ PASS |
 
 ## Known limitation: a hard power-off (reconnect) can't be emulated from a macOS peripheral
 

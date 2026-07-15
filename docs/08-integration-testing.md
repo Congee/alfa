@@ -332,7 +332,7 @@ advertisement — see `Tools/ble-integration/README.md`):
 |-----------|--------------------------------------------------------------------------------|--------|
 | `connect` | discover → bond (notify-subscribe) → fw handshake (DD30/DD31) → DD11 push       | ✅ PASS |
 | `standby` | `CC05` off notification → engine backs off (no standing connect, no reconnect)  | ✅ PASS |
-| `focus`   | `FF02` focus-acquired → immediate DD11 push while stationary (gates bypassed)   | ✅ PASS (2026-07-15) |
+| `focus`   | `FF02` focus-acquired *and* shutter-fired → immediate DD11 pushes while stationary | ✅ PASS (2026-07-15) |
 
 **Not covered by the harness (by design):** the **power-cycle reconnect** (IT-12) and **fix-expiry** (IT-11) paths need
 the peripheral's *radio* to vanish, which a macOS `CBPeripheralManager` cannot do — releasing the manager or exiting the
@@ -350,13 +350,22 @@ gone across relaunch. Then forget on both OS + camera side (reset procedure) and
 
 **Pre:** bonded + connected + geotagging; enable the camera's Bluetooth remote-control setting (pin its exact A7R V
 menu path here when running this — do not guess it). Console streaming `subsystem:me.congee.alfa`.
-**Steps:** stand still (so the distance gate stays closed), half-press the shutter until focus locks.
-**Expect:** `notify FF02 = 02 3F 20` in the log followed immediately by `location write acked`; the camera's location
-overlay refreshes. Rapid AF re-acquisitions within ~2 s must **not** produce extra writes (focus-push throttle).
-With the camera's remote setting **off**: no focus events arrive (or `02 C3 00`), and geotagging is unaffected.
-**Pass:** half-press → immediate push, throttled; no writes and no errors with the setting off.
-*(The FF02 → push mechanics are pre-verified over the real radio by the harness `focus` scenario below; this test
-pins the real body's behavior and the camera-side setting.)*
+**Steps:** stand still (so the distance gate stays closed), activate AF (half-press, or AF-ON for back-button focus)
+until focus locks; separately, take a photo.
+**Expect:** `notify FF02 = 02 3F 20` (AF) and `02 A0 20` (shutter) in the log, each followed immediately by
+`location write acked`; the camera's location overlay refreshes. Rapid AF re-acquisitions or burst frames within
+~2 s must **not** produce extra writes (capture-push throttle). With the camera's remote setting **off**: no FF02
+events arrive (or `02 C3 00`), and geotagging is unaffected.
+**Pass:** AF/shutter → immediate push, throttled; no writes and no errors with the setting off.
+
+**Partial result 2026-07-15 (shutter half ✅):** a real photo taken with **back-button focus and no AF-button press**
+produced `notify FF02 = 02 A0 20` → `02 A0 00` on the live link — the FF02 feed works on the real body (its remote
+setting was on), and the shutter pair is first-party-verified. No `3F` event appeared, which is *expected* for a shot
+with no AF activation — that observation is why the shutter codes became a push trigger alongside focus (a
+back-button-focus shooter may never emit a shot-coupled focus event). **Still open (focus half):** repeat with an
+actual AF activation — AF-ON press or half-press until lock — and confirm `02 3F 20` + immediate push on this body.
+*(The FF02 → push mechanics for both triggers are pre-verified over the real radio by the harness `focus` scenario
+below; this test pins the real body's behavior and the camera-side setting.)*
 
 ## IT-9 — GPS accuracy *(Rig B — iPhone)*
 

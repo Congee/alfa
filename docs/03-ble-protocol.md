@@ -107,16 +107,21 @@ alpha-gps, camera-gps-link, swremote, CameraSync docs):
 | `02 3F 00` | focus lost / ready | 4 projects |
 | `02 3F 20` | focus acquired | **5 projects** |
 | `02 3F 40` | focus busy | 1 (swremote only) 🟡 |
-| `02 A0 00` | shutter ready / back from picture | 5 projects |
-| `02 A0 20` | picture being taken | 5 projects |
+| `02 A0 00` | shutter ready / back from picture | 5 projects **+ ✅ observed on A7R V fw 4.0 (2026-07-15)** |
+| `02 A0 20` | picture being taken | 5 projects **+ ✅ observed on A7R V fw 4.0 (2026-07-15)** |
 | `02 D5 00` | recording stopped | 4 projects |
 | `02 D5 20` | recording started | 3 projects |
 | `02 C3 00` | remote feature inactive on camera | 2 implementations + 1 doc |
 
-**Implemented (Phase 1, listen-only):** `CameraLink` subscribes to `FF02` and `02 3F 20` triggers an immediate
-fresh-position push — "update location on focus" (`GeotagInput.focusAcquired`, throttled). Nothing is ever written to
-`FF01` in Phase 1; subscribing is safe whatever the camera-side remote setting (off ⇒ silence or `02 C3 00`). DD
-(location) + FF (remote status) demonstrably coexist on one link (alpha-gps and camera-gps-link both do it).
+**Implemented (Phase 1, listen-only):** `CameraLink` subscribes to `FF02`, and `02 3F 20` (focus acquired) **or**
+`02 A0 20` (shutter fired) triggers an immediate fresh-position push — "update location on focus"
+(`GeotagInput.captureActivity`, throttled). The shutter trigger is grounded in first-party evidence: a real A7R V
+photo taken with **back-button focus** (no half-press, so no shot-coupled AF activation) emitted only
+`02 A0 20` → `02 A0 00` — no `3F` event at all (device log 2026-07-15; whether an actual AF activation emits `3F 20`
+on this body is still IT-13's open question). Nothing is ever written to `FF01` in Phase 1; subscribing is safe
+whatever the camera-side remote setting (off ⇒ silence or `02 C3 00`). DD (location) + FF (remote status)
+demonstrably coexist on one link (alpha-gps and camera-gps-link both do it, and the same A7R V log shows DD11 writes
+acked alongside FF02 notifies).
 
 To detect the user enabling "Bluetooth Rmt Ctrl" at runtime, alpha-gps and camera-gps-link both send a harmless
 half-shutter-release (`01 06`) as a probe (~3 s / 250 ms cadences) while the feature reads inactive — any `FF02`

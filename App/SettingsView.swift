@@ -27,8 +27,9 @@ struct SettingsView: View {
                 } footer: {
                     Text("Location is sent only after you move at least this far, and no more often than the "
                         + "interval. Larger values save battery. Update on focus additionally pushes the freshest "
-                        + "location the instant the camera focuses (half-press), so each shot gets the most accurate "
-                        + "tag — the camera sends focus events only with its Bluetooth remote-control setting on.")
+                        + "location the instant the camera focuses or fires the shutter, so each shot gets the most "
+                        + "accurate tag — the camera sends these events only with its Bluetooth remote-control "
+                        + "setting on.")
                 }
 
                 Section {

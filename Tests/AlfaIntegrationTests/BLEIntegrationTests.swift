@@ -110,10 +110,11 @@ final class BLEIntegrationTests: XCTestCase {
         }
     }
 
-    /// Requires the Mac sim in **`ALFA_SIM_SCRIPT=focus`** mode (it sends an FF02 focus-acquired notification shortly
-    /// after the first location write). Proves update-on-focus over the real radio: the half-press status triggers an
-    /// immediate second DD11 push even though the phone hasn't moved (the stationary feeder never clears the distance
-    /// gate, and the 45 s keep-alive can't fire inside the 20 s window — so push #2 can only be the focus push).
+    /// Requires the Mac sim in **`ALFA_SIM_SCRIPT=focus`** mode (an FF02 focus-acquired notification shortly after the
+    /// first location write, then a shutter-fired pair past the capture throttle). Proves both update-on-focus triggers
+    /// over the real radio: each status notify produces an immediate DD11 push even though the phone hasn't moved (the
+    /// stationary feeder never clears the distance gate, and the 45 s keep-alive can't fire inside the assertion
+    /// windows — so pushes #2 and #3 can only be the focus and shutter pushes).
     func testFocusTriggersImmediatePush() async throws {
         try requireIntegrationEnv()
         let central = Self.makeTestCentral()
@@ -121,6 +122,7 @@ final class BLEIntegrationTests: XCTestCase {
         let connected = expectation(description: "connected to the mock camera")
         let pushedOnConnect = expectation(description: "initial on-connect push")
         let pushedOnFocus = expectation(description: "second push triggered by FF02 focus-acquired")
+        let pushedOnShutter = expectation(description: "third push triggered by FF02 shutter-fired")
 
         let monitor = Task {
             for await event in central.events {
@@ -134,6 +136,7 @@ final class BLEIntegrationTests: XCTestCase {
                     // expectation as a fatal API violation (it crashes the runner — seen on-device 2026-07-15).
                     if count == 1 { pushedOnConnect.fulfill() }
                     if count == 2 { pushedOnFocus.fulfill() }
+                    if count == 3 { pushedOnShutter.fulfill() }
                 case .failure(let message):
                     NSLog("[IT] failure(\(message))")
                 default:
@@ -148,6 +151,7 @@ final class BLEIntegrationTests: XCTestCase {
 
         await fulfillment(of: [connected, pushedOnConnect], timeout: 45)
         await fulfillment(of: [pushedOnFocus], timeout: 20)
+        await fulfillment(of: [pushedOnShutter], timeout: 20)
 
         feeder.cancel()
         monitor.cancel()
