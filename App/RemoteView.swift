@@ -90,18 +90,7 @@ struct RemoteView: View {
     }
 }
 
-// MARK: - Camera-body palette (deliberate constants — this surface does not adapt to the system theme)
-
-private enum CameraBody {
-    static let surface = Color(red: 0.063, green: 0.067, blue: 0.071)      // matte magnesium
-    static let control = Color(red: 0.110, green: 0.118, blue: 0.125)      // raised button face
-    static let controlEdge = Color.white.opacity(0.08)
-    static let label = Color(red: 0.604, green: 0.620, blue: 0.639)        // silkscreen gray
-    static let text = Color(red: 0.949, green: 0.949, blue: 0.949)
-    static let alphaOrange = Color(red: 0.890, green: 0.447, blue: 0.133)  // the α mount ring
-    static let recRed = Color(red: 0.898, green: 0.282, blue: 0.302)       // reserved for recording
-    static let okGreen = Color(red: 0.388, green: 0.757, blue: 0.455)
-}
+// The camera-body palette lives in `Theme.swift` — shared with Home's status plate.
 
 // MARK: - State banner (activity word + signal bars + timers + failure line)
 

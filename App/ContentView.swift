@@ -40,6 +40,7 @@ struct ContentView: View {
         .fullScreenCover(isPresented: onboardingBinding) {
             OnboardingView(coordinator: session.geotag)
         }
+        .tint(Theme.accent) // outermost, so presented covers/sheets inherit the α-orange accent too
     }
 
     private var remoteIsVisible: Bool {
