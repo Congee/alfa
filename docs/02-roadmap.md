@@ -57,7 +57,9 @@ The core of the project. Deliver GPS + time sync **and** the "good BLE citizen" 
 - [x] SwiftUI UI: tab shell (Home / Settings / Help); pairing + permissions onboarding flow (Bluetooth →
       Location When-in-use→Always → camera-prep checklist → pair → done); status (connection, camera indicator,
       Bluetooth + location access, fixes pushed, last fix, errors); enable/disable, "Sync now", "Forget camera"
-      (confirmation dialog). *TODO: multi-camera list, camera battery if reported.*
+      (confirmation dialog). *TODO: multi-camera list, camera battery if reported.* *2026-07-15: app-wide design
+      pass — α-orange accent, silkscreen label voice, Home's camera-chrome status plate (`App/Theme.swift` shares
+      the Remote tab's palette; utility screens stay adaptive).*
 - [x] Settings + time sync: customisable update distance + interval (persisted, `GeotagSettings`); Time Correction
       (CC13 clock write — ✅ A7R V-verified, IT-4) + Time Area Correction (tz/dst block) toggles; in-app Help/Troubleshooting +
       compatibility. *(feature parity with Geotag Alpha's Phase-1 geotag surface; multi-camera

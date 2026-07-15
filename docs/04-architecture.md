@@ -16,9 +16,11 @@
 Alfa/
 ├── App/                      # iOS app target (SwiftUI). Thin. No protocol logic; names no SonyBLE types.
 │   ├── AlfaApp.swift         # @main; @UIApplicationDelegateAdaptor → AppDelegate
-│   ├── AppDelegate.swift     # owns the shared GeotagCoordinator; launch hook for BLE state restoration
-│   ├── ContentView.swift     # tab shell (Home/Settings/Help) + first-run onboarding cover
-│   ├── HomeView.swift        # status + enable/sync/forget
+│   ├── AppDelegate.swift     # owns the shared CameraSession; launch hook for BLE state restoration
+│   ├── ContentView.swift     # tab shell (Home/Remote/Settings/Help) + first-run onboarding cover
+│   ├── Theme.swift           # design language: α-orange accent, CameraBody palette, silkscreen labels
+│   ├── HomeView.swift        # status "top plate" (camera-chrome card) + map + enable/sync/forget
+│   ├── RemoteView.swift      # Phase 2 remote-control surface (always-dark camera-body chrome)
 │   ├── OnboardingView.swift  # permissions + camera-prep + pairing flow
 │   ├── SettingsView.swift    # update distance/interval + time-sync toggles
 │   ├── HelpView.swift        # troubleshooting + compatibility + about
@@ -35,17 +37,23 @@ Alfa/
     │   ├── SonyBLE/          # CoreBluetooth engine. Depends on SonyProtocol.
     │   │   ├── CameraTypes.swift      # connection/BT-availability states, events, ConnectionPolicy, LocationFix
     │   │   ├── GeotagPolicy.swift     # PURE Balanced-policy reducer (host-tested; distance + interval gates)
+    │   │   ├── RemoteControlPolicy.swift # PURE Phase 2 capture-sequence reducer (host-tested; connection-free)
     │   │   ├── SonyCBUUID.swift       # CBUUID values derived from the pure SonyGATT strings
     │   │   ├── BondedCameraStore.swift# persists the bonded camera identity (RememberedCamera: id+name, UserDefaults)
     │   │   ├── GeotagSettings.swift   # persisted user settings (distance/interval/time toggles, UserDefaults)
+    │   │   ├── ConnectionStats.swift  # persisted connection diagnostics (reconnect counts, connected time)
     │   │   ├── CameraLink.swift       # CoreBluetooth confinement — queue-confined @unchecked Sendable "hands"
-    │   │   └── CameraCentral.swift    # actor "brain": policy state + link + republished event stream
-    │   └── AlfaGeotag/       # CoreLocation + geotag orchestration. Depends on SonyBLE.
-    │       ├── LocationProvider.swift # CoreLocation → Sendable LocationFix / authorization streams
-    │       └── GeotagCoordinator.swift# @MainActor @Observable façade: pipes location in, mirrors events out
+    │   │   └── CameraCentral.swift    # actor "brain": both policy states + link + republished event stream
+    │   ├── AlfaGeotag/       # CoreLocation + geotag orchestration. Depends on SonyBLE.
+    │   │   ├── LocationProvider.swift # CoreLocation → Sendable LocationFix / authorization streams
+    │   │   ├── GeotagCoordinator.swift# @MainActor @Observable façade: pipes location in, mirrors events out
+    │   │   ├── RemoteCoordinator.swift# @MainActor @Observable Phase 2 façade: gestures in, remote state out
+    │   │   └── CameraSession.swift    # composition root: one shared CameraCentral behind both coordinators
+    │   └── AlfaCameraSim/    # macOS mock-camera peripheral for the two-radio integration harness (docs/08)
     └── Tests/
         ├── SonyProtocolTests/         # Swift Testing, pure, host-runnable
-        └── SonyBLETests/              # Balanced-policy reducer invariants (host-runnable)
+        └── SonyBLETests/              # policy-reducer invariants, both engines (host-runnable)
+(+ Tests/AlfaIntegrationTests at the repo root — the on-device XCTest half of the two-radio harness)
 ```
 
 Why a package rather than app-only groups: the pure and BLE logic must be shareable with the future Watch app,
