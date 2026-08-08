@@ -8,7 +8,8 @@
 #
 # Both xcodebuild -destination and devicectl accept the *hardware* UDID
 # (00xxxxxx-xxxxxxxxxxxxxxxx), so one identifier drives the whole script — unlike
-# `devicectl list devices`, whose Identifier column is a different (CoreDevice) UUID.
+# `devicectl list devices`, whose default Identifier column is a different (CoreDevice)
+# UUID — hence the explicit --columns udid in auto-detect below.
 # Signing is Automatic against Config/Local.xcconfig's DEVELOPMENT_TEAM; -allowProvisioningUpdates
 # lets Xcode mint/refresh the profile without opening the IDE.
 #
@@ -34,9 +35,18 @@ UDID="${1:-${ALFA_DEVICE_UDID:-}}"
 [[ "${1:-}" == "--" ]] && shift
 
 if [[ -z "$UDID" ]]; then
-    candidates=$(xcrun xctrace list devices 2>/dev/null \
-        | sed -n '/^== Devices ==/,/^== /p' \
-        | grep -E '\(00[0-9A-F]{6}-[0-9A-F]{16}\)$' || true)
+    # Ask CoreDevice, the same subsystem that installs below: xctrace's legacy DVT list
+    # files devices under "== Devices Offline ==" that devicectl still reaches fine.
+    # tunnelState is deliberately not in the predicate — it is only up mid-operation.
+    # Wireless devices are excluded; add OR … == 'localNetwork' to sideload over Wi-Fi.
+    filter="hardwareProperties.platform == 'iOS'"
+    filter+=" AND connectionProperties.pairingState == 'paired'"
+    filter+=" AND connectionProperties.transportType == 'wired'"
+    candidates=$(xcrun devicectl list devices \
+        --hide-default-columns --hide-headers \
+        --columns name --columns udid \
+        --filter "$filter" 2>/dev/null \
+        | grep -E '00[0-9A-F]{6}-[0-9A-F]{16}' || true)
     count=$(print -r -- "$candidates" | grep -c . || true)
     if (( count == 1 )); then
         UDID=$(print -r -- "$candidates" | grep -oE '00[0-9A-F]{6}-[0-9A-F]{16}')
