@@ -69,8 +69,11 @@ public actor CameraCentral {
     private var lastSeenConnectsWhilePoweredOff: Bool?
 
     private let eventContinuation: AsyncStream<CameraEvent>.Continuation
-    private let linkEvents: AsyncStream<LinkEvent>
-    private let linkEventContinuation: AsyncStream<LinkEvent>.Continuation
+    /// Live only between `start()` and `stop()`. An `AsyncStream` can be iterated **once**: a second consumer over a
+    /// stream whose first one already ended receives nothing (verified 2026-08-16), so the pair is made per `start()`
+    /// rather than per central. Finishing it in `stop()` also renders the old link's `onEvent` inert, so a late
+    /// CoreBluetooth callback can never be handled by the *next* link's consume task.
+    private var linkEventContinuation: AsyncStream<LinkEvent>.Continuation?
     private var consumeTask: Task<Void, Never>?
 
     public init(
@@ -83,7 +86,6 @@ public actor CameraCentral {
         self.restoreIdentifier = restoreIdentifier
         engine = GeotagPolicyEngine(config: policy)
         (events, eventContinuation) = AsyncStream.makeStream(of: CameraEvent.self)
-        (linkEvents, linkEventContinuation) = AsyncStream.makeStream(of: LinkEvent.self)
     }
 
     // MARK: - Public API
@@ -91,7 +93,9 @@ public actor CameraCentral {
     /// Creates the CoreBluetooth manager and begins consuming link events. Idempotent.
     public func start() {
         guard link == nil else { return }
-        let continuation = linkEventContinuation
+        // A fresh stream per link — see ``linkEventContinuation``.
+        let (stream, continuation) = AsyncStream.makeStream(of: LinkEvent.self)
+        linkEventContinuation = continuation
         let remembered = bondedStore.load()
         let newLink = CameraLink(
             restoreIdentifier: restoreIdentifier,
@@ -104,7 +108,6 @@ public actor CameraCentral {
         newLink.setBackgroundResume(backgroundResume)
         newLink.setForeground(isForeground)
 
-        let stream = linkEvents
         consumeTask = Task { [weak self] in
             for await event in stream {
                 await self?.handle(event)
@@ -118,6 +121,8 @@ public actor CameraCentral {
         apply(engine.reduce(&state, .setEnabled(false)))
         link?.deactivate()
         link = nil
+        linkEventContinuation?.finish()
+        linkEventContinuation = nil
         consumeTask?.cancel()
         consumeTask = nil
         // The connection transition above already reset the remote engine's beliefs; the Tasks just need killing.
