@@ -80,6 +80,8 @@ The core of the project. Deliver GPS + time sync **and** the "good BLE citizen" 
       unblocked 2026-07-15: the debug `CC10` probe hit the real body — the characteristic **exists** (Read+Notify,
       19-byte payload, byte 13 = 100 on a full charge). UI waits on the decode being pinned at other charge levels
       (`docs/08` IT-14 part 2).*
+- [ ] Field logging + export (`09-field-logging.md`): bounded on-device log ring, Files-app visibility, share sheet.
+      Prerequisite for a multi-day field trial — the unified log evicts before the trip ends. *(planned, not started)*
 - [~] On-device validation on A7R V fw 4.0 (`08-integration-testing.md`): **IT-2 pair ✅**, **IT-4 CC13 clock ✅
       verified** (local-wall-clock interpretation correct — no UTC flip needed), **IT-12b background power-cycle
       reconnect ✅ field-verified (2026-07-15)** — lever off → on with the app backgrounded re-links and resumes
