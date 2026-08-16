@@ -465,8 +465,9 @@ public final class GeotagCoordinator {
                 stats.recordNotConnected(now: Date())
                 statsStore.save(stats)
             }
-            // The heartbeat lives no longer than a live link; it is (re)armed by each push below, not here.
-            if state != .connected { stopHeartbeat() }
+            // The heartbeat lives exactly as long as a live link: armed on arrival so it covers a first push that
+            // fails, re-armed by every write below, and stopped the moment the link isn't connected.
+            if state == .connected { armHeartbeat() } else { stopHeartbeat() }
             // Tie location delivery to the link. Connected (fresh connect, or standby → power-on) → continuous:
             // disables iOS's stationary auto-pause and un-pauses if it already hit (a pause never undoes itself, and
             // a paused app suspends — freezing the keep-alive until the camera expires its fix). Any other state →
@@ -492,9 +493,8 @@ public final class GeotagCoordinator {
     // The camera silently expires a location fix that stops being refreshed ("Location information cannot be
     // obtained"), and signals that expiry over no BLE characteristic — so it can only be prevented, not observed. This
     // is a one-shot timer re-armed after **every** write (via `.locationPushed`): a real position push keeps resetting
-    // it, so it only ever fires after a full ``heartbeatInterval`` of silence — i.e. when the phone is stationary. Its
-    // own re-push emits `.locationPushed`, which re-arms it, so a motionless link self-sustains at the keep-alive
-    // cadence. Foreground-only by construction: a suspended app can't run this timer.
+    // it, so it only ever fires after a full ``heartbeatInterval`` of silence — i.e. when the phone is stationary.
+    // Foreground-only by construction: a suspended app can't run this timer.
 
     private func armHeartbeat() {
         #if DEBUG
@@ -506,6 +506,11 @@ public final class GeotagCoordinator {
             try? await Task.sleep(for: Self.heartbeatInterval)
             guard !Task.isCancelled, let self else { return }
             await self.central.heartbeat()
+            // Re-arm from the tick, not only from the resulting ack. A failed write emits no `.locationPushed`, and
+            // a stationary phone clears no distance gate either, so an ack-only chain dies on the first failure —
+            // precisely when the keep-alive is the only thing holding the camera's fix alive.
+            guard !Task.isCancelled else { return }
+            self.armHeartbeat()
         }
     }
 
@@ -523,7 +528,8 @@ public final class GeotagCoordinator {
         if frozen {
             stopHeartbeat()
         } else if isConnected {
-            Task { await central.heartbeat() }
+            armHeartbeat()                      // resume the cadence even if the push below fails
+            Task { await central.heartbeat() }  // …and push once now, so T2 recovery is immediate
         }
     }
     #endif
