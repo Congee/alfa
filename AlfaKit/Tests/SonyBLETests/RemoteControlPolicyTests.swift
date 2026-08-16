@@ -242,17 +242,66 @@ struct RemoteControlPolicyTests {
         #expect(state.remoteFeatureActive)
     }
 
-    @Test("A rejected write drops every transient belief without new writes")
-    func writeFailureAborts() {
+    @Test("A rejected write takes back the presses already on the wire")
+    func writeFailureReleasesThrough() {
         var state = connectedState()
         _ = engine.reduce(&state, .shutterHalfDown(now: t0))
         _ = engine.reduce(&state, .buttonLockToggled(.c1, now: t0))
 
+        // Only the one write was rejected — the camera is still listening and still holding what we pressed.
         let abort = engine.reduce(&state, .commandWriteFailed("Unknown ATT error"))
-        #expect(commands(abort).isEmpty)
+        #expect(commands(abort) == [SonyRemoteCommand.shutterHalf.release, SonyRemoteCommand.c1.release])
         #expect(state.shutter == .idle)
         #expect(state.c1 == .idle)
         #expect(state.lastFailure == .writeFailed("Unknown ATT error"))
+
+        // State is reset before the releases go out, so a release that fails in turn emits nothing — no cascade.
+        #expect(commands(engine.reduce(&state, .commandWriteFailed("Unknown ATT error"))).isEmpty)
+    }
+
+    @Test("A locked button is released, not silently abandoned, when an unrelated write fails")
+    func writeFailureNeverStrandsALockedButton() {
+        var state = connectedState()
+        #expect(commands(engine.reduce(&state, .buttonLockToggled(.afOn, now: t0)))
+            == [SonyRemoteCommand.afOn.press])
+
+        let abort = engine.reduce(&state, .commandWriteFailed("Unknown ATT error"))
+        #expect(commands(abort) == [SonyRemoteCommand.afOn.release]) // or the camera holds AF-ON down forever
+        #expect(state.afOn == .idle)
+
+        // And the next lock tap is a fresh press — never a second press stacked on an unreleased one.
+        #expect(commands(engine.reduce(&state, .buttonLockToggled(.afOn, now: t0 + 1)))
+            == [SonyRemoteCommand.afOn.press])
+        #expect(state.afOn == .locked)
+    }
+
+    @Test("A dead link is abandoned without writes — releases only go out while connected")
+    func abandonsWithoutWritesWhenDisconnected() {
+        var state = connectedState()
+        _ = engine.reduce(&state, .buttonLockToggled(.afOn, now: t0))
+        _ = engine.reduce(&state, .connectionChanged(.backedOff)) // clears beliefs, no writes
+
+        state.afOn = .locked // a belief that outlived the link cannot be written away
+        #expect(commands(engine.reduce(&state, .commandWriteFailed("link not ready"))).isEmpty)
+        #expect(state.afOn == .idle)
+    }
+
+    @Test("remoteFeatureActive is a belief about one link, not a latch that outlives reconnects")
+    func remoteFeatureActiveResetsOnReconnect() {
+        var state = connectedState()
+        _ = engine.reduce(&state, .remoteStatus(.remoteFeatureInactive, now: t0))
+        #expect(!state.remoteFeatureActive)
+
+        // The user enables the camera's Bluetooth remote setting; the link drops and comes back.
+        _ = engine.reduce(&state, .connectionChanged(.backedOff))
+        _ = engine.reduce(&state, .connectionChanged(.connected))
+        #expect(state.remoteFeatureActive)
+        #expect(state.lastFailure == nil) // the old link's failure is not this link's news
+
+        // Without the reset the remote stays inert forever: Alfa sends nothing, so the camera emits no FF02
+        // traffic, so nothing ever clears the flag.
+        #expect(commands(engine.reduce(&state, .shutterAutoSequenceRequested(now: t0 + 1)))
+            == [SonyRemoteCommand.shutterHalf.press])
     }
 
     @Test("Disconnecting resets every belief; inputs while disconnected are refused")

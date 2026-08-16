@@ -273,20 +273,30 @@ public struct RemoteControlEngine: Sendable {
             }
 
         case let .commandWriteFailed(message):
-            // The camera never saw whatever we believed was pressed — drop every transient belief without
-            // sending more writes (they would fail the same way).
+            // Only the one write was rejected — the link itself may well be alive, and an earlier press of ours is
+            // already on the wire. Take it back, or a held button stays physically down with no finger on it. A
+            // release for a press that never landed is harmless; state is reset before the releases are returned,
+            // so a release that fails in turn re-enters here and emits nothing.
             state.lastFailure = .writeFailed(message)
-            return abandonTransientState(&state)
+            return abandonTransientState(&state, releasing: state.connection == .connected)
 
         case let .connectionChanged(connection):
             state.connection = connection
-            guard connection != .connected else { return [] }
+            guard connection != .connected else {
+                // A fresh link starts with fresh beliefs: `remoteFeatureActive` describes *this* connection, and
+                // only FF02 traffic ever clears it again. Left sticky, one `02 C3 00` would outlive every reconnect
+                // and leave the remote permanently inert — with Alfa sending nothing, the camera has no reason to
+                // emit the traffic that would unstick it.
+                state.remoteFeatureActive = true
+                state.lastFailure = nil
+                return []
+            }
             // Leaving `.connected`: the link owns no presses any more; reset beliefs, cancel timers, no writes.
             state.focus = .unknown
             state.isRecording = false
             state.recordingStartedAt = nil
             state.exposureStartedAt = nil
-            return abandonTransientState(&state)
+            return abandonTransientState(&state, releasing: false)
         }
     }
 
@@ -302,7 +312,7 @@ public struct RemoteControlEngine: Sendable {
             // beliefs without further writes and surface the one failure the user can actually fix on-camera.
             state.remoteFeatureActive = false
             state.lastFailure = .remoteFeatureInactive
-            return abandonTransientState(&state)
+            return abandonTransientState(&state, releasing: false)
         }
         state.remoteFeatureActive = true // any other FF02 traffic proves the feed is live
 
@@ -359,32 +369,47 @@ public struct RemoteControlEngine: Sendable {
         ]
     }
 
-    /// Releases whatever the gesture layer had pressed (full before half), returning the shutter to idle.
-    private func releaseThrough(_ state: inout RemoteControlState) -> [RemoteControlAction] {
-        var commands: [RemoteControlAction] = []
-        switch state.shutter {
+    /// The releases that undo whatever shutter stage is down — full before half, never half under full.
+    private func shutterReleases(_ phase: ShutterPhase) -> [RemoteControlAction] {
+        switch phase {
         case .fullHeld, .autoFiring:
-            commands = [
+            [
                 .sendCommand(SonyRemoteCommand.shutterFull.release),
                 .sendCommand(SonyRemoteCommand.shutterHalf.release),
             ]
         case .halfHeld, .autoFocusing:
-            commands = [.sendCommand(SonyRemoteCommand.shutterHalf.release)]
+            [.sendCommand(SonyRemoteCommand.shutterHalf.release)]
         case .idle:
-            break
+            []
         }
+    }
+
+    /// Releases whatever the gesture layer had pressed (full before half), returning the shutter to idle.
+    private func releaseThrough(_ state: inout RemoteControlState) -> [RemoteControlAction] {
+        let commands = shutterReleases(state.shutter)
         state.shutter = .idle
         return cancelAllTimeouts(&state) + commands
     }
 
-    /// Drops every transient belief (shutter phase, held/locked buttons) with **no** further writes — the paths
-    /// that reach here (write failure, remote-inactive, disconnect) are exactly the ones where more writes are
-    /// pointless or harmful. Timeout cancellation is still emitted so nothing stale fires later.
-    private func abandonTransientState(_ state: inout RemoteControlState) -> [RemoteControlAction] {
+    /// Drops every transient belief (shutter phase, held/locked buttons). `releasing` decides whether the presses
+    /// already on the wire are taken back: a rejected write leaves the camera listening, so they must be — where a
+    /// remote-inactive camera or a dropped link can't receive them anyway. Timeout cancellation is always emitted
+    /// so nothing stale fires later.
+    private func abandonTransientState(
+        _ state: inout RemoteControlState,
+        releasing: Bool
+    ) -> [RemoteControlAction] {
+        var releases: [RemoteControlAction] = []
+        if releasing {
+            releases = shutterReleases(state.shutter)
+            for button in RemoteHoldButton.allCases where state[button] != .idle {
+                releases.append(.sendCommand(Self.command(for: button).release))
+            }
+        }
         state.shutter = .idle
         state.afOn = .idle
         state.c1 = .idle
-        return cancelAllTimeouts(&state)
+        return cancelAllTimeouts(&state) + releases
     }
 
     private func cancelAllTimeouts(_ state: inout RemoteControlState) -> [RemoteControlAction] {
