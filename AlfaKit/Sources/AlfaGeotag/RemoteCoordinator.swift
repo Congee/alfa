@@ -62,13 +62,71 @@ public final class RemoteCoordinator {
     private let defaults: UserDefaults
     private static let shutterModeKey = "me.congee.alfa.remote.shutterMode"
 
+    /// Gestures are queued here rather than each getting its own `Task`. Separately-created unstructured tasks reach
+    /// an actor in an unspecified order — measured at ~2.7 % inversions for two submitted back to back (2026-08-16) —
+    /// and the engine downstream exists precisely to enforce ordering. A reordered `buttonUp`/`buttonDown` pair leaves
+    /// a button `.held` with a press on the wire and the finger already lifted.
+    private let intents: AsyncStream<Intent>.Continuation
+
     init(central: CameraCentral, defaults: UserDefaults = .standard) {
         self.central = central
         self.defaults = defaults
         shutterMode = defaults.string(forKey: Self.shutterModeKey).flatMap(ShutterMode.init(rawValue:)) ?? .tapAuto
+
+        // Unbounded: dropping a gesture is the failure this queue exists to prevent.
+        let (stream, continuation) = AsyncStream.makeStream(of: Intent.self, bufferingPolicy: .unbounded)
+        intents = continuation
+        // Awaiting each call before taking the next is what serializes them. Captures `central`, not `self`, so the
+        // pump never keeps this coordinator alive; `deinit` ends the stream and with it the loop.
+        Task { [central] in
+            for await intent in stream {
+                await Self.deliver(intent, to: central)
+            }
+        }
+    }
+
+    deinit {
+        intents.finish() // ends the pump's loop, and with it the task
     }
 
     // MARK: - Intents
+
+    /// One gesture, in the order the finger made it.
+    private enum Intent: Sendable {
+        case shutterTapped
+        case shutterHalfDown
+        case shutterHalfUp
+        case shutterFullDown
+        case shutterFullUp
+        case shutterCancelled
+        case buttonDown(RemoteHoldButton)
+        case buttonUp(RemoteHoldButton)
+        case buttonLockToggled(RemoteHoldButton)
+        case recordTapped
+        case setRemoteVisible(Bool)
+        #if DEBUG
+        case probe([UInt8])
+        #endif
+    }
+
+    private static func deliver(_ intent: Intent, to central: CameraCentral) async {
+        switch intent {
+        case .shutterTapped: await central.shutterTapped()
+        case .shutterHalfDown: await central.shutterHalfDown()
+        case .shutterHalfUp: await central.shutterHalfUp()
+        case .shutterFullDown: await central.shutterFullDown()
+        case .shutterFullUp: await central.shutterFullUp()
+        case .shutterCancelled: await central.shutterGestureCancelled()
+        case let .buttonDown(button): await central.buttonDown(button)
+        case let .buttonUp(button): await central.buttonUp(button)
+        case let .buttonLockToggled(button): await central.buttonLockToggled(button)
+        case .recordTapped: await central.recordTapped()
+        case let .setRemoteVisible(visible): await central.setRemoteUIVisible(visible)
+        #if DEBUG
+        case let .probe(bytes): await central.sendProbeCommand(bytes)
+        #endif
+        }
+    }
 
     public func setShutterMode(_ mode: ShutterMode) {
         shutterMode = mode
@@ -77,49 +135,49 @@ public final class RemoteCoordinator {
 
     /// Tap-mode shutter: the safe autonomous capture sequence.
     public func shutterTapped() {
-        Task { await central.shutterTapped() }
+        intents.yield(.shutterTapped)
     }
 
     public func shutterHalfDown() {
-        Task { await central.shutterHalfDown() }
+        intents.yield(.shutterHalfDown)
     }
 
     public func shutterHalfUp() {
-        Task { await central.shutterHalfUp() }
+        intents.yield(.shutterHalfUp)
     }
 
     public func shutterFullDown() {
-        Task { await central.shutterFullDown() }
+        intents.yield(.shutterFullDown)
     }
 
     public func shutterFullUp() {
-        Task { await central.shutterFullUp() }
+        intents.yield(.shutterFullUp)
     }
 
     public func shutterCancelled() {
-        Task { await central.shutterGestureCancelled() }
+        intents.yield(.shutterCancelled)
     }
 
     public func buttonDown(_ button: HoldButton) {
-        Task { await central.buttonDown(button.engineButton) }
+        intents.yield(.buttonDown(button.engineButton))
     }
 
     public func buttonUp(_ button: HoldButton) {
-        Task { await central.buttonUp(button.engineButton) }
+        intents.yield(.buttonUp(button.engineButton))
     }
 
     public func buttonLockToggled(_ button: HoldButton) {
-        Task { await central.buttonLockToggled(button.engineButton) }
+        intents.yield(.buttonLockToggled(button.engineButton))
     }
 
     public func recordTapped() {
-        Task { await central.recordTapped() }
+        intents.yield(.recordTapped)
     }
 
     /// Drives the RSSI poll from the Remote tab's visibility — no radio reads while the tab isn't on screen.
     public func setRemoteVisible(_ visible: Bool) {
         if !visible { signalBars = nil } // stale bars are worse than none
-        Task { await central.setRemoteUIVisible(visible) }
+        intents.yield(.setRemoteVisible(visible))
     }
 
     #if DEBUG
@@ -143,7 +201,7 @@ public final class RemoteCoordinator {
         guard Self.probeMatrix.indices.contains(index) else { return }
         let bytes = Self.probeMatrix[index]
         probeHistory.insert(probeCandidates[index], at: 0)
-        Task { await central.sendProbeCommand(bytes) }
+        intents.yield(.probe(bytes))
     }
     #endif
 
