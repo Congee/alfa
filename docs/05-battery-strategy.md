@@ -85,7 +85,8 @@ cheap and expected — the camera radio is already awake.
    during a background power-cycle showed the real mechanism: on every reconnect to an off-but-connectable camera Alfa
    ran full service discovery, declared `ready` **before any write was acknowledged**, and pushed location — all of
    which failed (`ready — services + handshake complete` immediately followed by `write FAILED on DD30/DD31/DD11:
-   Unknown ATT error`) — then the link dropped and the cycle repeated. That premature-`ready`-then-failed-write **churn**
+   Unknown ATT error`) — then the link dropped and the cycle repeated. *(Both lines are quoted as captured; the first
+   is now emitted as `… handshake acknowledged`, the second carries the ATT domain/code.)* That premature-`ready`-then-failed-write **churn**
    was the drain. When the camera was genuinely on, the identical path worked (`location write acked`, steady keep-alives).
 
    **The fix: acknowledge-gated readiness + a dormant standby hold.** The fw-gated handshake is now **sequential and
@@ -101,6 +102,18 @@ cheap and expected — the camera radio is already awake.
    the connection is held quietly rather than being repeatedly re-established and written to. Whether merely *holding*
    a link to a Cnct-ON off camera costs its battery anything is a camera-side property only the IT-10 field
    measurement can settle — with Cnct-OFF the question doesn't arise, because a silent camera has nothing to hold.
+
+   **Refinement (2026-08-16): a standby hold is not unconditional — a *stale link* is rebuilt.** Field-observed after
+   a phone Bluetooth bounce: a camera that was demonstrably **on** had its handshake rejected and was parked in
+   standby, and probing the same link never recovered it — the body handshook on the first attempt nine seconds after
+   the link was finally dropped. So after `maxStandbyProbes` (3) rejected probes the link is dropped
+   (`CameraLink.rebuildStaleLink`) and the policy re-establishes it, which is the only thing observed to work.
+   **This deliberately does not apply to the case this rule is about.** A body serving a *reduced* GATT — no location
+   characteristics at all — is the genuinely-off "Cnct. while Power OFF" camera, and reconnecting that on a timer is
+   precisely the wake magnet this section forbids; it is held indefinitely and probed as before, with Service Changed
+   still the background power-on detector. The rebuild fires only for a camera that **is** serving its Sony GATT and
+   still rejects the handshake, which a powered-off body does not do. Cost in that case is one reconnect per ~4
+   minutes, against an indefinite dead window before.
 
    **Field refinement (2026-07-14, second capture): the camera accepts a reconnect before it serves its GATT.** A
    **Cnct-OFF** A7R V goes silent at lever-off, so the standing connect completed only at lever-**on** — but it

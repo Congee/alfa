@@ -1,6 +1,6 @@
 # 08 — Integration Testing (on-device)
 
-The host test suite (`swift test`, 49 tests) locks the **pure** logic — packet layouts and the Balanced-policy
+The host test suite (`swift test`, 101 tests in 10 suites) locks the **pure** logic — packet layouts and the Balanced-policy
 reducer's anti-churn invariants (including the keep-alive heartbeat's guard rails and foreground-aware reconnect). It cannot exercise CoreBluetooth,
 CoreLocation, bonding, background relaunch, or the real A7R V. This document is the on-device plan that closes that gap
 and validates the three open 🟡 assumptions (`CC13` clock, `CC05` standby value, `DD21` tz bit), the **background
@@ -31,24 +31,29 @@ system-triggered *background* relaunch — where no debugger can attach — is s
 **Stream (primary):** Console.app → select the device in the sidebar → search field: `subsystem:me.congee.alfa`.
 Keep it open across backgrounding and relaunch.
 
-**Capture (CLI):** `Tools/alfa-logs.sh [minutes]` collects the last N minutes from the connected device and prints
-the filtered markers (auto-detects the device; keeps the archive in `$TMPDIR` for re-querying). Equivalent raw
-commands:
+**Capture (CLI):** `Tools/alfa-logs.sh [minutes] [udid]` collects the last N minutes from the device and prints the
+filtered markers (keeps the archive in `$TMPDIR` for re-querying). Device pick order: the `udid` argument →
+`$ALFA_DEVICE_UDID` → auto-detect, which errors unless **exactly one** device is connected — so with two devices
+paired, pass the UDID. Collection needs **USB**: over Wi-Fi/localNetwork `log collect` fails with "Device not
+configured (6)". Equivalent raw commands:
 ```
 sudo log collect --device-udid 00008110-00043032360A801E --last 10m --output alfa.logarchive
 log show alfa.logarchive --predicate 'subsystem == "me.congee.alfa"' --info --style compact
 ```
-> ⚠️ `log collect --device-udid` takes the **hardware** UDID (`00xxxxxx-…`, from `xcrun xctrace list devices`) —
-> **not** the CoreDevice UUID that `devicectl` uses below (that fails with "unable to obtain a connection"). It also
-> needs `sudo`.
+> ⚠️ `log collect --device-udid` takes the **hardware** UDID (`00xxxxxx-…`, from `xcrun xctrace list devices`), never
+> the CoreDevice UUID (that fails with "unable to obtain a connection"). It also needs `sudo`. `devicectl` is the
+> lenient one — it accepts the hardware UDID for `--device` too (verified 2026-08-16), so the hardware UDID is the
+> single identifier that works everywhere; prefer it.
 
-**Install / launch:**
+**Install / launch:** `Tools/alfa-install.sh [device-name]` builds Release, installs, and reports how long the
+free-account signing lasts (7 days — `~/.nix` runs an `ios-sideload-refresh` agent that re-signs before it lapses,
+but only while the device is reachable from this Mac). It prints the matching launch command:
 ```
-APP=~/Library/Developer/Xcode/DerivedData/Alfa-*/Build/Products/Debug-iphoneos/Alfa.app
-xcrun devicectl device install app --device 0A2AEAB0-7204-590E-940B-64C04B1D9F25 "$APP"
-xcrun devicectl device process launch --device 0A2AEAB0-7204-590E-940B-64C04B1D9F25 me.congee.alfa
+Tools/alfa-install.sh "Changsheng's iPad"
+xcrun devicectl device process launch --device <hardware-udid> me.congee.alfa
 ```
-(The "No provider was found" line during install/launch is a benign devicectl warning; success is the line after it.)
+`alfa-install.sh` resolves the device by name, so neither identifier has to be typed. (The "No provider was found"
+line during install/launch is a benign devicectl warning; success is the line after it.)
 
 **Optional BLE sniff:** PacketLogger (Xcode → *Additional Tools for Xcode* → *Hardware*) captures the actual ATT
 writes/notifications — the ground truth for IT-4's byte-level verification.
@@ -62,9 +67,11 @@ writes/notifications — the ground truth for IT-4's byte-level verification.
 | `restore: link survived — re-discovering services to resume` *(ble)* | Restored link was live → resuming |
 | `restore: link dropped — cancelling intent and backing off (no reconnect)` *(ble)* | Restored link dead → anti-churn back-off |
 | `connected — discovering services` *(ble)* | `didConnect` |
-| `ready — services + handshake complete` *(ble)* | Bonded, GATT mapped, fw handshake done |
+| `ready — services + handshake acknowledged` *(ble)* | Bonded, GATT mapped, fw handshake done |
 | `disconnected: …` / `connect failed: …` *(ble)* | Link lifecycle ends |
 | `backing off — cancelling pending connect intent` *(ble)* | A standing `connect()` was cancelled |
+| `write FAILED on <char>: <reason> [<domain> <code>]` *(ble)* | A write was rejected. The bracketed domain/code is the part that discriminates: `CBATTErrorDomain 5`/`15` is an unusable link (needs re-encryption), where `localizedDescription` alone renders everything as "Unknown ATT error" |
+| `standby probes exhausted on a camera that is serving its GATT — link is stale, dropping to rebuild` *(ble)* | Three standby probes rejected by a camera that *is* serving its Sony GATT → the link is dropped so the policy rebuilds it. Never fires for a reduced-GATT (genuinely off) body |
 
 ## Camera-side preconditions (A7R V, fw 4.0)
 
@@ -105,7 +112,7 @@ forgotten.
 **Pre:** IT-1 done, camera in preconditions, camera **On**. **Steps:** Home → Enable (or the onboarding Pair step).
 
 **Expect:** `connected — discovering services` → OS pairing dialog (from the DD01 notify-subscribe trick) → accept →
-`ready — services + handshake complete`. UI: Connection "Connected", Camera row shows the model name. If ATT 5/15
+`ready — services + handshake acknowledged`. UI: Connection "Connected", Camera row shows the model name. If ATT 5/15
 appears, it retries ~3× at 3 s (watch for a repeated notify attempt) then bonds.
 
 **Pass:** reaches `ready`, camera name shown, remembered across a cold launch (Camera row visible before Enable).
@@ -205,7 +212,7 @@ Trigger: while the link is still alive after the SIGKILL, cause a **subscribed**
 transition (camera → standby with *Cnct while Power OFF On* keeps BLE up) is the practical trigger.
 
 **Expect:** `restore: willRestoreState — 1 peripheral(s), first state=2` → `restore: link survived — re-discovering
-services to resume` → `ready — services + handshake complete` (chars re-populated, notify re-subscribed, CC13 re-sync
+services to resume` → `ready — services + handshake acknowledged` (chars re-populated, notify re-subscribed, CC13 re-sync
 if enabled). Then, if the CC05 that woke us reads *off*, it immediately backs off (IT-5 path) — expected and correct.
 
 **Pass:** the live link is resumed (re-discovered + re-subscribed) rather than dropped; subsequent standby still backs
@@ -278,7 +285,7 @@ scenario the user hit). Console streaming `subsystem:me.congee.alfa`.
 **IT-12a — foreground.** App open. Flip the lever **off** (link drops: camera overlay → "Bluetooth connection
 unavailable"; iOS Bluetooth shows disconnected) → flip **on**. **Expect:** because the link was genuinely `.connected`,
 the engine re-arms a standing connect (`beginDiscovery`) instead of backing off; iOS services it on power-on →
-`connected — discovering services` → `ready — services + handshake complete`; UI "Connected" and the camera overlay
+`connected — discovering services` → `ready — services + handshake acknowledged`; UI "Connected" and the camera overlay
 returns to "Obtaining location information" **on its own**.
 
 **IT-12b — background.** Same, but press **Home** to background the app first (do **not** swipe-kill), then flip the
@@ -290,7 +297,7 @@ re-links — relaunching the app via state restoration if it was suspended (`res
 > **before** the camera's Sony GATT exists — discovery then returns a reduced GATT and the log shows
 > `connected — discovering services` → `no location service in GATT … holding link in standby`. Recovery is the
 > bonded **Service Changed** indication once the full GATT is restored: `services modified … — re-discovering` →
-> `ready — services + handshake complete` (backstopped by the 15 s discovery-stall watchdog and the 60 s standby
+> `ready — services + handshake acknowledged` (backstopped by the 15 s discovery-stall watchdog and the 60 s standby
 > probe). Eternal silence after `connected — discovering services` is the pre-fix zombie fingerprint — it must not
 > appear.
 
@@ -306,7 +313,10 @@ without user action (user-confirmed, `Cnct. while Power OFF: Off`). IT-12a foreg
 > relaunch). **The problem:** with no CC05-off, the standby **bail never fires either**, so Alfa re-links to a
 > lever-off "Cnct while Power OFF" camera. **Addressed (2026-07-15, `a5ac612`):** a re-link to a camera that isn't
 > serving/accepting the Sony GATT now converges to a **dormant `.standby` hold** — no writes, a 60 s probe, ack-gated
-> `.ready` — so Alfa adds no traffic of its own to the held link. Whether the *held link alone* still keeps the body
+> `.ready` — so Alfa adds no traffic of its own to the held link. *(Refined 2026-08-16: three rejected probes from a
+> camera that **is** serving its GATT now drop the link so it can be rebuilt — a stale link never recovers in place.
+> A reduced-GATT body, the genuinely-off case this paragraph is about, is still held indefinitely and never rebuilt.)*
+> Whether the *held link alone* still keeps the body
 > awake (the access lamp was observed staying on under the old, actively-held link; the dormant hold is unmeasured)
 > is exactly what IT-10 condition (b) answers. If it drains, the fallback design is the Sony **advertisement
 > power/status byte** as a pre-connect discriminator (bounded scan reconnects only to a genuinely-powered-on camera —

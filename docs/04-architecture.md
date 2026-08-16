@@ -47,7 +47,8 @@ Alfa/
     │   ├── AlfaGeotag/       # CoreLocation + geotag orchestration. Depends on SonyBLE.
     │   │   ├── LocationProvider.swift # CoreLocation → Sendable LocationFix / authorization streams
     │   │   ├── GeotagCoordinator.swift# @MainActor @Observable façade: pipes location in, mirrors events out
-    │   │   ├── RemoteCoordinator.swift# @MainActor @Observable Phase 2 façade: gestures in, remote state out
+    │   │   ├── RemoteCoordinator.swift# @MainActor @Observable Phase 2 façade: gestures in (one serialized queue,
+    │   │   │                          #   never a Task per call — order is the choreography), remote state out
     │   │   └── CameraSession.swift    # composition root: one shared CameraCentral behind both coordinators
     │   └── AlfaCameraSim/    # macOS mock-camera peripheral for the two-radio integration harness (docs/08)
     └── Tests/

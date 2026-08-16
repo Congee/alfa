@@ -143,7 +143,7 @@ errors return GATT status `0x0185`. 🟡
 | Char | Role |
 |------|------|
 | `CC01`/`CC02` | control notify / command |
-| `CC05` | power/Wi-Fi state — alpha-gps: `04 00 00 00 00` when on, `04 00 00 02 04` when off |
+| `CC05` | power/Wi-Fi state — alpha-gps: `04 00 00 00 00` when on, `04 00 00 02 04` when off. Alfa matches these two frames **exactly** (trailing bytes tolerated) and treats everything else as `.unknown`: it is the *Wi-Fi* state too, and a false `.off` tears the link down and silently stops geotagging |
 | `CC06`/`CC07` | Wi-Fi SSID / password (BLE→Wi-Fi handoff) |
 | `CC13` | time-sync packet on some newer bodies (13 bytes): `[12,0,0, yearHi,yearLo, month,day,hour,min,sec, dstFlag, signedOffsetHour, offsetMin]` (single-source, alpha-gps RE) |
 

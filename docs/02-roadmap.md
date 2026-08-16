@@ -50,7 +50,9 @@ The core of the project. Deliver GPS + time sync **and** the "good BLE citizen" 
       wake-magnet loop). A camera that answers the connect **without serving the Sony GATT** — connectable-while-off,
       or inside its power-on **boot window** before the GATT exists — is held in a **dormant standby** (no writes,
       60 s probe, 15 s discovery-stall watchdog), recovering to ready via the bonded **Service Changed** indication
-      and the ack-gated handshake. *The connect/handshake/push and CC05-standby-bail paths are covered by a two-radio
+      and the ack-gated handshake. A camera that *is* serving its GATT but keeps rejecting the handshake is a stale
+      link, not an off body: after three probes it is dropped and rebuilt (2026-08-16; a reduced-GATT body is still
+      held indefinitely). *The connect/handshake/push and CC05-standby-bail paths are covered by a two-radio
       on-device integration harness (`Tools/ble-integration/`: mock camera on the Mac, real central on the device under
       `xcodebuild test`) — both PASS. Power-cycle reconnect (a link-drop a macOS peripheral can't emulate) and fix-expiry
       stay covered by the pure-reducer host tests + on-device logs (`08` IT-11/IT-12).*
@@ -95,7 +97,7 @@ Mirror Alpha Remote Controller's core over the Remote Control service (`8000FF00
 
 - [x] `SonyBLE` remote command path (2026-07-15): `CameraLink` discovers + writes `FF01` behind the same
       ack-gated-handshake gate as location writes; typed `LinkEvent`s for FF02/CC05; command acks/failures surfaced.
-- [x] Reliable capture sequence: pure `RemoteControlEngine` (sibling of the geotag reducer, 19 host tests) owns
+- [x] Reliable capture sequence: pure `RemoteControlEngine` (sibling of the geotag reducer, 22 host tests) owns
       half → focus-ack/timeout → full → shutter-active → release-through, generation-tagged timeouts,
       `02 C3 00`/write-failure/disconnect aborts; **structurally connection-free** (its action type cannot express
       a connect). Verified end-to-end over the radio (harness `capture` scenario). Focus-ack timeout *escalates*
