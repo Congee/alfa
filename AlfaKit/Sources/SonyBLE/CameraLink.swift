@@ -105,20 +105,18 @@ final class CameraLink: NSObject, @unchecked Sendable {
     /// Last camera-on state logged during the current scan, so the raw advertisement is logged on change only (an
     /// `allowDuplicates` scan fires many times a second).
     private var lastAdvCameraOn: Bool?
-    /// True while the camera is believed bonded: set when the `DD01` notify subscription succeeds, and seeded from
-    /// `knownIdentifier` (a camera is only remembered after reaching `.ready`, i.e. after bonding). Lets us tell a
-    /// pre-bond write failure (first pairing: retry) from a powered-off camera (enter standby immediately — no point
-    /// burning retries against a body that is rejecting every write because it is off).
-    private var didBond = false
     /// True while holding a link to a camera that is connected at the BLE layer but powered off (its handshake writes
     /// are rejected). We push nothing and probe slowly for power-on rather than churning the link — the fix for the
     /// standby drain (see `docs/05-battery-strategy.md`).
     private var inStandby = false
-    /// Handshake attempts in the current (re)connect, so a pre-bond failure is retried a bounded number of times before
+    /// Handshake attempts in the current (re)connect, so a rejected write is retried a bounded number of times before
     /// concluding the camera is off.
     private var handshakeAttempts = 0
     /// Slow "is it back on yet?" probe armed while holding a dormant standby link.
     private var standbyProbe: DispatchWorkItem?
+    /// Standby probes rejected by a camera that *is* serving its Sony GATT. Counted only on that branch — a reduced-GATT
+    /// (genuinely off) body is held indefinitely, never rebuilt. See ``rebuildStaleLink``.
+    private var standbyProbes = 0
     /// Watchdog for the connect → ready pipeline. The A7R V accepts a (re)connect while its Sony GATT is not being
     /// served — field-verified 2026-07-14 in the **power-on boot window** (the radio answers within a second of the
     /// lever, before the services exist; a Cnct-ON off-standby body presumably behaves the same) — and answers
@@ -143,6 +141,8 @@ final class CameraLink: NSObject, @unchecked Sendable {
     /// A dispatch timer only fires while the app has runtime, so this covers the foreground/awake case; the
     /// *suspended*-background power-on detector is the camera's Service Changed indication (`didModifyServices`).
     private static let standbyProbeSeconds = 60.0
+    /// Rejected standby probes tolerated from a *serving* camera before the link is presumed stale and rebuilt.
+    private static let maxStandbyProbes = 3
     /// How long connect → ready may take before the link is presumed to be a powered-off camera (see
     /// ``discoveryStall``). Generous enough for a slow discovery on a genuinely-on body; the watchdog additionally
     /// no-ops once any location characteristic is known, so it can never cut short a slow first-pairing handshake.
@@ -156,7 +156,6 @@ final class CameraLink: NSObject, @unchecked Sendable {
         self.restoreIdentifier = restoreIdentifier
         self.knownIdentifier = knownIdentifier
         self.onEvent = onEvent
-        didBond = knownIdentifier != nil // a remembered camera reached `.ready` before, so it is bonded
         super.init()
     }
 
@@ -458,9 +457,9 @@ final class CameraLink: NSObject, @unchecked Sendable {
         remoteNotifyRetries = 0
         sawCameraOff = false
         lastAdvCameraOn = nil
-        didBond = knownIdentifier != nil // bonding survives a drop; only a forgotten camera resets it
         inStandby = false
         handshakeAttempts = 0
+        standbyProbes = 0
         standbyProbe?.cancel()
         standbyProbe = nil
         discoveryStall?.cancel()
@@ -496,6 +495,14 @@ final class CameraLink: NSObject, @unchecked Sendable {
         #endif
     }
 
+    /// `localizedDescription` collapses most ATT failures to "Unknown ATT error", which cannot tell a powered-off
+    /// camera from a link that has not re-encrypted yet — the ambiguity that cost a diagnosis on 2026-08-16. Carry
+    /// the raw domain/code too, so the retry budget in `handleHandshakeFailure` can eventually branch on evidence.
+    private static func describe(_ error: Error) -> String {
+        let error = error as NSError
+        return "\(error.localizedDescription) [\(error.domain) \(error.code)]"
+    }
+
     private static func advertisesLocationService(_ advertisementData: [String: Any]) -> Bool {
         let advertised = advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID]
         return advertised?.contains(SonyCBUUID.locationService) ?? false
@@ -529,6 +536,7 @@ final class CameraLink: NSObject, @unchecked Sendable {
         handshakeComplete = true
         inStandby = false
         handshakeAttempts = 0
+        standbyProbes = 0
         standbyProbe?.cancel()
         standbyProbe = nil
         discoveryStall?.cancel()
@@ -537,12 +545,16 @@ final class CameraLink: NSObject, @unchecked Sendable {
         onEvent(.ready(id: peripheral.identifier, name: peripheral.name))
     }
 
-    /// A handshake write was rejected. On an already-bonded camera this means it is powered off → hold the link in
-    /// standby. When we may not be bonded yet (first pairing), retry a bounded number of times first — the OS pairing
-    /// dialog may still be resolving.
+    /// A handshake write was rejected. That means either "the camera is powered off" or "this link is not usable
+    /// yet", and the ATT error does not tell them apart — a link rebuilt right after the phone's Bluetooth restarted
+    /// has not re-encrypted and reports the same failure as a body that is off (field-observed 2026-08-16, on a
+    /// camera that was demonstrably on). So retry a bounded few times before concluding it is off, whether or not
+    /// this camera is already bonded: bond state answers "is this a first pairing", not "is this failure transient".
+    /// Against a genuinely off camera the cost is three writes, well under what the 60 s standby probe already
+    /// spends on it. Once in standby this returns immediately, so the probe's own failures never re-enter here.
     private func handleHandshakeFailure() {
         guard !inStandby, !handshakeComplete else { return }
-        if !didBond, handshakeAttempts < Self.maxHandshakeRetries {
+        if handshakeAttempts < Self.maxHandshakeRetries {
             handshakeAttempts += 1
             queue.asyncAfter(deadline: .now() + 3) { [self] in
                 guard peripheral != nil, !handshakeComplete, !inStandby else { return }
@@ -568,24 +580,52 @@ final class CameraLink: NSObject, @unchecked Sendable {
 
     /// One standby probe: if the off camera never yielded location characteristics (its reduced powered-off GATT),
     /// re-run service discovery — a powered-on camera answers with the full database and the normal path takes over.
-    /// Otherwise re-try the handshake: acks → `markReady` (power-on); still rejected → stays in standby.
-    private func probeStandby() {
-        guard let peripheral, inStandby else { return }
+    /// Otherwise re-try the handshake: acks → `markReady` (power-on); still rejected → stays in standby, and after
+    /// ``maxStandbyProbes`` the link itself is suspect (``rebuildStaleLink``).
+    ///
+    /// `mayRebuild` is for the timer only. An opportunistic probe driven by an incoming notification is evidence the
+    /// camera is alive and the link carries traffic, so it neither spends the budget nor drops the link.
+    ///
+    /// Returns whether to keep probing this link.
+    @discardableResult
+    private func probeStandby(mayRebuild: Bool) -> Bool {
+        guard let peripheral, inStandby else { return false }
         if writeChar == nil, unlockChar == nil, enableChar == nil {
+            // Reduced GATT — the signature of a genuinely off "Cnct. while Power OFF" body. Hold it indefinitely and
+            // never rebuild: reconnecting an off camera on a timer is the wake magnet `docs/05` exists to prevent.
             log.notice("standby probe — re-running service discovery")
             peripheral.discoverServices([SonyCBUUID.locationService, SonyCBUUID.cameraControlService, SonyCBUUID.remoteControlService])
-        } else {
-            handshakeAttempts = 0
-            startHandshake()
+            return true
         }
+        if mayRebuild {
+            guard standbyProbes < Self.maxStandbyProbes else {
+                rebuildStaleLink(peripheral)
+                return false
+            }
+            standbyProbes += 1
+        }
+        handshakeAttempts = 0
+        startHandshake()
+        return true
+    }
+
+    /// Every standby probe has been rejected by a camera that *is* serving its Sony GATT. A powered-off body does not
+    /// serve one, so the likelier reading is a link that never re-encrypted — and no amount of probing repairs that;
+    /// only a fresh link does (field-observed 2026-08-16: the body handshook on the first attempt nine seconds after
+    /// the stale link was dropped). Drop it and let `didDisconnectPeripheral` → policy re-establish, which is the same
+    /// path that recovered the field case. `clearPeripheralState` resets the counters, so the new link starts fresh.
+    private func rebuildStaleLink(_ peripheral: CBPeripheral) {
+        log.notice("standby probes exhausted on a camera that is serving its GATT — link is stale, dropping to rebuild")
+        standbyProbe?.cancel()
+        standbyProbe = nil
+        manager?.cancelPeripheralConnection(peripheral)
     }
 
     private func scheduleStandbyProbe() {
         standbyProbe?.cancel()
         let item = DispatchWorkItem { [self] in
             guard peripheral != nil, inStandby else { return }
-            probeStandby()
-            scheduleStandbyProbe() // keep probing until power-on or disconnect
+            if probeStandby(mayRebuild: true) { scheduleStandbyProbe() } // until power-on, a rebuild, or a disconnect
         }
         standbyProbe = item
         queue.asyncAfter(deadline: .now() + Self.standbyProbeSeconds, execute: item)
@@ -893,11 +933,11 @@ extension CameraLink: CBPeripheralDelegate {
             return
         }
         if let error {
-            log.notice("write FAILED on \(characteristic.uuid.uuidString, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            log.notice("write FAILED on \(characteristic.uuid.uuidString, privacy: .public): \(Self.describe(error), privacy: .public)")
             if !handshakeComplete {
-                // A handshake write rejected before we ever went ready: a bonded camera that refuses writes is powered
-                // off ("Cnct. while Power OFF"). Hold in standby instead of declaring a false "connected" and pushing
+                // A handshake write rejected before we ever went ready. Never declare a false "connected" and push
                 // location into the void — that premature-ready + failed-push storm was the standby drain (docs/05).
+                // Whether this is a powered-off body or an unusable link is decided downstream, not here.
                 handleHandshakeFailure()
             } else {
                 // A push/keep-alive write failed on a live link — surface it (the link likely just dropped).
@@ -947,7 +987,7 @@ extension CameraLink: CBPeripheralDelegate {
         // immediately rather than waiting for the slow standby timer.
         if inStandby {
             log.notice("standby: notification received — probing (possible power-on)")
-            probeStandby()
+            probeStandby(mayRebuild: false)
         }
         // Decode the well-understood feeds here (the link already owns SonyProtocol); everything else stays raw.
         switch characteristic.uuid {
@@ -976,7 +1016,7 @@ extension CameraLink: CBPeripheralDelegate {
         // per-characteristic: DD01 is the bonding trigger, CC05 is the best-effort standby signal.
         switch characteristic.uuid {
         case SonyCBUUID.locationNotify:
-            if error == nil { didBond = true; return } // subscription succeeded ⇒ the camera is bonded
+            if error == nil { return } // subscribed — the camera is bonded, nothing to retry
             guard bondRetries < Self.maxBondRetries else { return }
             bondRetries += 1
             queue.asyncAfter(deadline: .now() + 3) { [self] in
