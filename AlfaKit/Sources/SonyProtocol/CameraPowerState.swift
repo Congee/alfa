@@ -7,8 +7,12 @@ import Foundation
 ///
 /// Byte semantics are single-source (alpha-gps RE, medium confidence — see `docs/03-ble-protocol.md`):
 /// `04 00 00 00 00` = on, `04 00 00 02 04` = off. Parsing is therefore deliberately conservative: it reports a
-/// definitive `.off` (which tears the link down) only for a well-formed frame, and returns `.unknown` for anything it
-/// does not recognise so malformed data can never trigger a spurious disconnect.
+/// definitive `.off` (which tears the link down) only for a frame it recognises, and returns `.unknown` for everything
+/// else so unmodelled data can never trigger a spurious disconnect.
+///
+/// Note that `CC05` is silent on the A7R V (`docs/03`), so this is a best-effort signal on bodies that do emit it —
+/// the real power discriminator is the advertisement's `0x21` `CameraOn` bit. That asymmetry sets the trade: missing a
+/// genuine power-off costs a link held slightly too long, while a false one silently stops geotagging.
 public enum CameraPowerState: Sendable, Equatable {
     /// Camera is awake — a BLE link is worth holding for per-shot geotags.
     case on
@@ -17,14 +21,20 @@ public enum CameraPowerState: Sendable, Equatable {
     /// Frame not recognised — make no power-policy decision.
     case unknown
 
+    /// The only two frames anyone has reverse-engineered.
+    private static let onFrame: [UInt8] = [0x04, 0x00, 0x00, 0x00, 0x00]
+    private static let offFrame: [UInt8] = [0x04, 0x00, 0x00, 0x02, 0x04]
+
     /// Parses a raw `CC05` notification/read value.
     public init(cc05 bytes: [UInt8]) {
-        // Every known frame is a `0x04`-tagged, ≥5-byte block; anything else is not a power-state frame we understand.
-        guard bytes.first == 0x04, bytes.count >= 5 else {
-            self = .unknown
-            return
+        // Match the documented frames exactly; trailing bytes are tolerated, near-misses are not. `CC05` is
+        // "power/**Wi-Fi** state", so an unrecognised frame is at least as likely to be a Wi-Fi transition on a
+        // camera that is wide awake — and `.off` is not a cheap guess: it tears the link down and backs off, which
+        // stops geotagging until the user foregrounds the app. Short and empty frames fall out here too.
+        switch Array(bytes.prefix(5)) {
+        case Self.onFrame: self = .on
+        case Self.offFrame: self = .off
+        default: self = .unknown
         }
-        // In the documented frames the state lives in the payload: an all-zero payload ⇒ on, otherwise ⇒ off.
-        self = bytes.dropFirst().allSatisfy { $0 == 0 } ? .on : .off
     }
 }
