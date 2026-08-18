@@ -21,15 +21,20 @@ to do.
 
 ## Status
 
-Early scaffold. **Phase 1** (battery-efficient GPS + time geotagging) is under construction. See
-[`docs/02-roadmap.md`](docs/02-roadmap.md).
+**Phase 1** (battery-efficient GPS + time geotagging) and **Phase 2** (foreground remote control) are implemented and
+run against a real A7R V (fw 4.0). This is not a released app: distribution is a personal sideload, and a number of
+on-device validation items are still open — including the multi-hour battery-drain field test that is the project's
+whole point. See [`docs/02-roadmap.md`](docs/02-roadmap.md) for what is verified versus owed.
 
 | Area | State |
 |------|-------|
-| Sony BLE protocol model (`SonyProtocol`) | GPS/time packet encoder implemented + unit-tested; command & advertisement models defined |
-| BLE connection engine (`SonyBLE`) | Architecture defined, implementation stubbed |
-| Geotag coordinator (`AlfaGeotag`) | Architecture defined, implementation stubbed |
-| iOS app shell (`App`) | Boilerplate SwiftUI app |
+| Sony BLE protocol model (`SonyProtocol`) | Location/time packet encoders, advertisement + remote-status parsers, `CC05`/`CC13` — pure, no CoreBluetooth, host-tested |
+| BLE connection engine (`SonyBLE`) | `CameraCentral` actor + queue-confined `CameraLink`: bond, firmware-gated handshake, keep-alive, standby back-off, background state restoration |
+| Geotag coordinator (`AlfaGeotag`) | CoreLocation → policy-gated `DD11` pushes, time/time-zone sync, push-on-focus |
+| Remote control (Phase 2) | Pure capture-sequence reducer + gated `FF01` command path + Remote tab (shutter / AF-ON / REC) |
+| iOS app (`App`) | Home / Remote / Settings / Help, plus the permissions + pairing onboarding flow |
+| Tests | 101 host tests in 10 suites (pure, device-free) + a two-radio on-device integration harness |
+| CI | Not set up yet |
 
 ## Documentation
 
@@ -43,6 +48,8 @@ All design and reverse-engineering knowledge lives in [`docs/`](docs/):
 - [`05-battery-strategy.md`](docs/05-battery-strategy.md) — the drain root cause and Alfa's fix
 - [`06-code-quality.md`](docs/06-code-quality.md) — standards and tooling
 - [`07-references.md`](docs/07-references.md) — prior art and sources
+- [`08-integration-testing.md`](docs/08-integration-testing.md) — the on-device test plan, log markers, and field results
+- [`09-field-logging.md`](docs/09-field-logging.md) — design for the bounded on-device log ring *(planned)*
 
 ## Building
 
@@ -50,18 +57,22 @@ Requires **Xcode 26+** and **[XcodeGen](https://github.com/yonaskolb/XcodeGen)**
 [`project.yml`](project.yml) and is not committed.
 
 ```sh
+# Signing config — gitignored, so it never carries a personal Team ID into the repo
+cp Config/Local.xcconfig.example Config/Local.xcconfig   # then set DEVELOPMENT_TEAM
+
 # Generate Alfa.xcodeproj (via Nix; or `brew install xcodegen`)
 nix run nixpkgs#xcodegen
 
-# Run the pure protocol unit tests on the host (no device needed)
+# Run the pure unit tests on the host — no device, no camera
 cd AlfaKit && swift test
 
 # Open and run on your device
 open Alfa.xcodeproj
 ```
 
-Distribution target is **personal sideload with a free Apple ID** (7-day re-sign). Set your own
-`DEVELOPMENT_TEAM` and a unique `PRODUCT_BUNDLE_IDENTIFIER` in `project.yml` before building to a device.
+Distribution target is **personal sideload with a free Apple ID** (7-day re-sign); a free personal team is enough.
+Change `PRODUCT_BUNDLE_IDENTIFIER` in [`project.yml`](project.yml) to something you own.
+`Tools/alfa-install.sh [device-name]` does the Release build, install, and signing-expiry report in one step.
 
 ## Legal / ethics
 
@@ -71,4 +82,4 @@ trademarks or code, ships no Sony firmware, and requires no firmware modificatio
 
 ## License
 
-[MIT](LICENSE). Set your name as the copyright holder before publishing.
+[MIT](LICENSE).

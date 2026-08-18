@@ -37,7 +37,7 @@ filtered markers (keeps the archive in `$TMPDIR` for re-querying). Device pick o
 paired, pass the UDID. Collection needs **USB**: over Wi-Fi/localNetwork `log collect` fails with "Device not
 configured (6)". Equivalent raw commands:
 ```
-sudo log collect --device-udid 00008110-00043032360A801E --last 10m --output alfa.logarchive
+sudo log collect --device-udid <hardware-udid> --last 10m --output alfa.logarchive
 log show alfa.logarchive --predicate 'subsystem == "me.congee.alfa"' --info --style compact
 ```
 > ⚠️ `log collect --device-udid` takes the **hardware** UDID (`00xxxxxx-…`, from `xcrun xctrace list devices`), never
@@ -46,10 +46,10 @@ log show alfa.logarchive --predicate 'subsystem == "me.congee.alfa"' --info --st
 > single identifier that works everywhere; prefer it.
 
 **Install / launch:** `Tools/alfa-install.sh [device-name]` builds Release, installs, and reports how long the
-free-account signing lasts (7 days — `~/.nix` runs an `ios-sideload-refresh` agent that re-signs before it lapses,
-but only while the device is reachable from this Mac). It prints the matching launch command:
+free-account signing lasts (7 days; re-signing before it lapses is left to a launch agent outside this repo, and
+only works while the device is reachable from the Mac). It prints the matching launch command:
 ```
-Tools/alfa-install.sh "Changsheng's iPad"
+Tools/alfa-install.sh "<device name>"
 xcrun devicectl device process launch --device <hardware-udid> me.congee.alfa
 ```
 `alfa-install.sh` resolves the device by name, so neither identifier has to be typed. (The "No provider was found"

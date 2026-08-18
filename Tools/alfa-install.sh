@@ -66,7 +66,7 @@ if [[ "$SELECTOR" =~ $UDID_RE ]]; then
 elif [[ -n "$SELECTOR" ]]; then
     # A name is already unambiguous, so no transport condition at all; an unreachable device is
     # caught later, at the build, where it gets its own message.
-    # Predicate literal is double-quoted so names with apostrophes work ("Changsheng's iPad");
+    # Predicate literal is double-quoted so names with apostrophes work ("Alex's iPad");
     # any double quote in the name is escaped for the same reason.
     filter="$PAIRED_IOS AND deviceProperties.name == \"${SELECTOR//\"/\\\"}\""
     matches=(${(f)"$(device_udids "$filter")"}); matches=(${matches:#})

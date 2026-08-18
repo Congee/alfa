@@ -13,10 +13,25 @@
 #   focus    -> testFocusTriggersImmediatePush           (sim: focus)    FF02 focus-acquired -> immediate DD11 push
 #
 # Usage:  Tools/ble-integration/on-device-it.sh
-# Env:    ALFA_DEVICE_UDID (default the paired iPad), ALFA_SIM_EXPIRY_SECONDS.
+# Env:    ALFA_DEVICE_UDID (else the only connected iOS device), ALFA_SIM_EXPIRY_SECONDS.
 set -uo pipefail
-ROOT="/Users/cwu/dev/Alfa"
-DEVICE="${ALFA_DEVICE_UDID:-00008110-00043032360A801E}"
+ROOT="${0:A:h:h:h}"
+DEVICE="${ALFA_DEVICE_UDID:-}"
+
+if [[ -z "$DEVICE" ]]; then
+  candidates=$(xcrun xctrace list devices 2>/dev/null \
+    | sed -n '/^== Devices ==/,/^== /p' \
+    | grep -E '\(00[0-9A-F]{6}-[0-9A-F]{16}\)$' || true)
+  count=$(print -r -- "$candidates" | grep -c . || true)
+  if (( count == 1 )); then
+    DEVICE=$(print -r -- "$candidates" | grep -oE '00[0-9A-F]{6}-[0-9A-F]{16}')
+    print -r -- "Device: $candidates"
+  else
+    print -r -- "Expected exactly one connected iOS device, found $count — set ALFA_DEVICE_UDID:" >&2
+    [[ -n "$candidates" ]] && print -r -- "$candidates" >&2
+    exit 1
+  fi
+fi
 DD="$ROOT/.build/xcode-it"                    # gitignored (.build/) — predictable xctestrun path
 SIMBIN="$ROOT/AlfaKit/.build/debug/AlfaCameraSim"
 export ALFA_SIM_EXPIRY_SECONDS="${ALFA_SIM_EXPIRY_SECONDS:-300}"

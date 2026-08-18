@@ -50,9 +50,10 @@ is compiled out of release builds and inert unless the env var is set.
 Tools/ble-integration/on-device-it.sh          # builds, then runs all scenarios; prints PASS/FAIL
 ```
 
-The device UDID defaults to the paired iPad; override with `ALFA_DEVICE_UDID`. To drive by hand, run the sim in one
-terminal (`swift run --package-path AlfaKit AlfaCameraSim`) and `xcodebuild test-without-building ... -only-testing:...`
-in another (see the script for the exact invocation and the `.xctestrun` env injection).
+The device is the only connected iOS device, or `ALFA_DEVICE_UDID` when more than one is attached. To drive it by
+hand, run the sim in one terminal (`swift run --package-path AlfaKit AlfaCameraSim`) and the on-device XCTest with
+`test-without-building ... -only-testing:...` in another (see the script for the exact invocation and the
+`.xctestrun` env injection).
 
 ## What these tests prove (verified on-device: iPad mini 6, A7R V engine)
 
